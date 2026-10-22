@@ -1,3 +1,6 @@
+<img width="2752" height="1536" alt="emblem-github" src="https://github.com/user-attachments/assets/edcc632b-da99-4691-9d43-7e0c06b454ff" />
+
+
 # kekkai (結界)
 
 Static site boundary & disclosure check.

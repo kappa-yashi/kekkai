@@ -1,0 +1,12 @@
+{
+  "name": "@kappa-yashi/kekkai",
+  "version": "1.0.0",
+  "description": "kekkai (結界) — static site boundary & disclosure check: headers, CSP, leaks. Zero dependencies.",
+  "type": "module",
+  "bin": { "kekkai": "bin/kekkai.mjs" },
+  "files": ["bin", "SKILL.md", "reference", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "keywords": ["kekkai", "security", "csp", "headers", "static-site", "astro", "cloudflare-pages", "netlify", "hardening", "claude-skill"],
+  "repository": { "type": "git", "url": "https://github.com/kappa-yashi/kekkai" },
+  "license": "MIT"
+}

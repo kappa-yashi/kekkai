@@ -14,6 +14,7 @@
 //   --forbid a,b,c      strings that must not appear anywhere in the output (codenames, staging hosts…)
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
+//   --repo | --dist     force the mode for a folder (default: .git without index.html/_headers → repo, otherwise dist)
 //
 // Only scan sites you own or are allowed to test.
 
@@ -24,7 +25,7 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true };
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '' };
 let target = '';
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -32,6 +33,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--strict') opt.strict = true;
   else if (a === '--no-probe') opt.probe = false;
   else if (a === '--no-history') opt.history = false;
+  else if (a === '--repo') opt.mode = 'repo';
+  else if (a === '--dist') opt.mode = 'dist';
   else if (a === '--admin') opt.admin = argv[++i] || '';
   else if (a === '--forbid') opt.forbid = (argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean);
   else if (a === '--pages') opt.pages = Number(argv[++i]) || 5;
@@ -47,7 +50,7 @@ function usage() {
   kekkai ./dist                       scan a build folder (+ _headers)
   kekkai ./repo                       scan a git working copy (auto-detected by .git)
 
-  --json  --strict  --no-probe  --no-history  --admin <folder>  --forbid a,b,c  --pages N`);
+  --json  --strict  --no-probe  --no-history  --repo | --dist  --admin <folder>  --forbid a,b,c  --pages N`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -117,6 +120,8 @@ function inspectHtml(html) {
 // Email detection with the usual false positives removed (uuid@site.zip, user@host prompts, "pkg@1.2.3").
 const EMAIL_RE = /(^|[^/\w.-])([A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.([A-Z]{2,}))(?![\w.-]*\.(?:zip|tar|gz|7z|js|mjs|css|png|jpg|webp|svg|json|md|html|txt|xml|woff2?))/gi;
 const TLDS = new Set('com net org io gr de uk co me eu info page dev app xyz gov edu fr it es nl be ch at se no fi dk pl cz pt ru ua ca us au nz jp cn in br mx ar tv cc ai cloud site online store tech email mail pro biz name studio design art blog ly sh to is im gg lol ie ro hu bg hr rs si sk lt lv ee tr il za kr tw hk sg my id th vn ph cy mt lu li'.split(' '));
+// --forbid terms match as whole tokens: "kframe" must not hit "checkFramebufferStatus", but "brand.com" and "brand-v2" still count.
+function hasForbidden(s, w) { return new RegExp(`(^|[^a-z0-9])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`, 'i').test(s); }
 function findEmails(s) {
   const out = new Set();
   for (const m of s.matchAll(EMAIL_RE)) if (TLDS.has(m[3].toLowerCase())) out.add(m[2]);
@@ -625,7 +630,7 @@ function distScan(dir) {
   if (pathHits.size) fail('local-paths', `local filesystem paths in the output: ${[...pathHits].map(([p, f]) => `${p} (${f})`).slice(0, 5).join(', ')}`); else pass('local-paths', 'no local filesystem paths');
   if (opt.forbid.length) {
     const hits = [];
-    for (const f of text) { const s = read(f).toLowerCase(); for (const w of opt.forbid) if (s.includes(w.toLowerCase())) hits.push(`${w} in ${f.rel}`); }
+    for (const f of text) { const s = read(f); for (const w of opt.forbid) if (hasForbidden(s, w)) hits.push(`${w} in ${f.rel}`); }
     if (hits.length) fail('forbid', `forbidden strings found: ${hits.slice(0, 10).join('; ')}`); else pass('forbid', `none of ${opt.forbid.length} forbidden string(s) appear`);
   }
   if (opt.admin) {
@@ -871,7 +876,8 @@ function repoScan(dir) {
     const envFiles = [...new Set((envHist || '').split('\n').filter(Boolean))].filter((f) => !/\.(example|sample|template)$/i.test(f));
     if (envFiles.length) fail('history-env', `env files were committed at some point: ${envFiles.slice(0, 4).join(', ')} — they are still in history; rotate and rewrite`);
     else pass('history-env', 'no .env / .dev.vars ever committed');
-    const forbidden = opt.forbid.length ? git(dir, ['grep', '-l', '-i', '-I', '-F', ...opt.forbid.flatMap((w) => ['-e', w]), ...revList.slice(0, 200)], { okStatus: [0, 1] }) : null;
+    const esc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const forbidden = opt.forbid.length ? git(dir, ['grep', '-l', '-i', '-I', '-E', `(^|[^a-zA-Z0-9])(${opt.forbid.map(esc).join('|')})([^a-zA-Z0-9]|$)`, ...revList.slice(0, 200)], { okStatus: [0, 1] }) : null;
     if (opt.forbid.length) { const n = (forbidden || '').split('\n').filter(Boolean).length; if (n) warn('history-forbid', `forbidden strings appear in history (${n} path(s))`); else pass('history-forbid', 'forbidden strings never appear in history'); }
   }
   const remote = (git(dir, ['remote', 'get-url', 'origin']) || '').trim();
@@ -880,7 +886,7 @@ function repoScan(dir) {
 
 // ───────────────────────────── run ─────────────────────────────
 const isDir = !/^https?:\/\//i.test(target) && existsSync(target) && statSync(target).isDirectory();
-const isRepo = isDir && existsSync(join(target, '.git')) && !existsSync(join(target, '_headers')) && !existsSync(join(target, 'index.html'));
+const isRepo = isDir && (opt.mode === 'repo' || (opt.mode !== 'dist' && existsSync(join(target, '.git')) && !existsSync(join(target, '_headers')) && !existsSync(join(target, 'index.html'))));
 if (isRepo) repoScan(target); else if (isDir) distScan(target); else await liveScan(target);
 
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };

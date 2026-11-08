@@ -130,7 +130,9 @@ under `/*` (Trap 1.3), and no new page can ship without a CSP, because the list
 is the output itself. The same script is the natural place to stamp
 `version.txt` (PART 3) from `CF_PAGES_COMMIT_SHA`, and to strip comments from
 any config file that is served publicly (a CMS `config.yml`), since those
-comments are read by everyone.
+comments are read by everyone. `kekkai init` scaffolds exactly this script
+(`scripts/kekkai-postbuild.mjs`), and `reference/build-rules.md` is the
+DO/DON'T list to write the site by so that nothing is left for the scan.
 
 ## Trap 1.1: the Access-Control-Allow-Origin wildcard
 

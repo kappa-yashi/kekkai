@@ -147,11 +147,37 @@ Exit code 0 = boundary holds, 1 = boundary broken, 2 = usage.
 ships a 20-line `serve.py` that does; scan `http://127.0.0.1:4399` and the
 transport checks are skipped automatically.
 
+## Start a project right: `kekkai init`
+
+```
+npx github:kappa-yashi/kekkai init . --admin <cms-folder>
+```
+
+Scaffolds, without touching existing files unless `--force`:
+
+- `scripts/kekkai-postbuild.mjs` — after `astro build`, writes `dist/_headers`
+  from the HTML that was actually built (one CSP block per route group, never
+  under `/*`, cache rules, the CMS block with its own CSP + `no-store` +
+  `noindex`), writes `version.txt` (`no-store`) from `package.json` +
+  `CF_PAGES_COMMIT_SHA`, strips comments from served `.yml`/`.toml`, and fails
+  if `public/_headers` exists. Edit the CONFIG block at the top.
+- `.gitignore` block (`.env*`, `.dev.vars`, `*.local.json`, agent folders,
+  `dist/`, `.astro/`).
+- `kekkai-rules.md` — a copy of `reference/build-rules.md`: DO/DON'T rules for
+  whoever writes the code, human or assistant, one line per check. Give it to
+  the assistant before the first component.
+- `package.json` `"build"` gets the post-build step when it is exactly
+  `astro build`; otherwise it prints what to add.
+
+Then set `build.inlineStylesheets: 'never'`, `vite.build.assetsInlineLimit: 0`
+and `markdown.syntaxHighlight: false` (or a class-based highlighter) in
+`astro.config.mjs`.
+
 ## As a Claude skill
 
 This repository is also a skill: `SKILL.md` tells Claude to run the scanner,
 how to read the report, and in which order to fix things;
-`reference/hardening.md` is the long-form guide (headers template, two CSP
+`reference/build-rules.md` holds the rules to write by; `reference/hardening.md` is the long-form guide (headers template, two CSP
 strategies with code, build fingerprint, host-dashboard traps, leak audit, the
 threat model of a Git-based CMS, and what the repository itself discloses:
 secrets, docs, changelogs, history rewriting). Copy the folder to `~/.claude/skills/kekkai`

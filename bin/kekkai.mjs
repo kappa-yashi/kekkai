@@ -5,6 +5,7 @@
 //   kekkai https://www.example.com          scan the live site (read-only GETs)
 //   kekkai ./dist                           scan a build output folder (+ its _headers)
 //   kekkai ./repo                           scan a git working copy (secrets, ignored files, docs that describe the security setup)
+//   kekkai init [dir] [--admin <cms>]       scaffold scripts/kekkai-postbuild.mjs, .gitignore block, kekkai-rules.md (--force overwrites)
 //
 // Options:
 //   --json              machine-readable output
@@ -28,14 +29,16 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false };
-const KNOWN_FLAGS = ['--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false };
+const KNOWN_FLAGS = ['--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith('-') && !KNOWN_FLAGS.includes(a)) { const [guess, score] = similar(a); console.error(`unknown option ${a}${score > 0.6 ? ` — did you mean ${guess}?` : ''}`); process.exit(2); }
-  if (a === '--json') opt.json = true;
+  if (a === 'init' && !target) { opt.init = true; continue; }
+  if (a === '--force') opt.force = true;
+  else if (a === '--json') opt.json = true;
   else if (a === '--out') opt.out = argv[++i] || '';
   else if (a === '--summary') opt.summary = true;
   else if (a === '--strict') opt.strict = true;
@@ -50,7 +53,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '-h' || a === '--help') { usage(); process.exit(0); }
   else target = a;
 }
-if (!target) { usage(); process.exit(2); }
+if (!target && !opt.init) { usage(); process.exit(2); }
 
 function usage() {
   console.log(`kekkai (結界) — static site boundary & disclosure check
@@ -58,6 +61,7 @@ function usage() {
   kekkai https://www.example.com      live scan (read-only GET requests)
   kekkai ./dist                       scan a build folder (+ _headers)
   kekkai ./repo                       scan a git working copy (auto-detected by .git)
+  kekkai init [dir] [--admin <cms>]   scaffold a project: post-build _headers/version.txt script, .gitignore block, build rules
 
   --json  --summary  --out <file.md|.json|.txt>  --strict  --no-probe  --no-history
   --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N`);
@@ -1075,8 +1079,71 @@ function repoScan(dir) {
   if (remote) { section('Repository'); info('remote', `origin: ${remote.replace(/\/\/[^@]+@/, '//***@')}${/github\.com/.test(remote) ? ' — if the site has a CMS or drafts, this repo must be private; check forks = 0 before any history rewrite' : ''}`); }
 }
 
+// ───────────────────────────── init ─────────────────────────────
+async function initProject(dir) {
+  const { writeFileSync, mkdirSync, appendFileSync } = await import('node:fs');
+  const here = new URL('.', import.meta.url);
+  const tpl = (name) => readFileSync(new URL(`../templates/${name}`, here), 'utf8');
+  const rules = readFileSync(new URL('../reference/build-rules.md', here), 'utf8');
+  const written = [], skipped = [];
+  const put = (relPath, content) => {
+    const abs = join(dir, relPath);
+    if (existsSync(abs) && !opt.force) { skipped.push(relPath); return; }
+    mkdirSync(join(abs, '..'), { recursive: true });
+    writeFileSync(abs, content); written.push(relPath);
+  };
+  let post = tpl('kekkai-postbuild.mjs');
+  if (opt.admin) post = post.replace("const ADMIN = process.env.KEKKAI_ADMIN || '';", `const ADMIN = process.env.KEKKAI_ADMIN || '${opt.admin}';`);
+  put('scripts/kekkai-postbuild.mjs', post);
+  put('kekkai-rules.md', rules);
+  // .gitignore block (append, idempotent)
+  const gi = join(dir, '.gitignore'); const block = `
+# kekkai: local and agent files never tracked
+.env
+.env.*
+!.env.example
+.dev.vars
+*.local.json
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.cursor/
+.cursorrules
+node_modules/
+dist/
+.astro/
+.DS_Store
+Thumbs.db
+`;
+  const giNow = existsSync(gi) ? readFileSync(gi, 'utf8') : '';
+  if (!/# kekkai:/.test(giNow)) { appendFileSync(gi, block); written.push('.gitignore (block appended)'); } else skipped.push('.gitignore (block present)');
+  // package.json build script, only when it is exactly "astro build"
+  const pj = join(dir, 'package.json'); let buildNote = '';
+  if (existsSync(pj)) {
+    const pkg = JSON.parse(readFileSync(pj, 'utf8'));
+    if (pkg.scripts?.build === 'astro build') { pkg.scripts.build = 'astro build && node scripts/kekkai-postbuild.mjs'; writeFileSync(pj, JSON.stringify(pkg, null, 2) + '\n'); written.push('package.json ("build" now runs the post-build script)'); }
+    else buildNote = `  package.json: make "build" end with  && node scripts/kekkai-postbuild.mjs   (current: ${JSON.stringify(pkg.scripts?.build || '')})`;
+  }
+  if (existsSync(join(dir, 'public', '_headers'))) buildNote += (buildNote ? '\n' : '') + '  public/_headers exists — delete it; the post-build script generates dist/_headers now.';
+  console.log(`\nkekkai init — ${dir}\n`);
+  for (const w of written) console.log(`  + ${w}`);
+  for (const k of skipped) console.log(`  = ${k} (exists; --force to overwrite)`);
+  console.log(`
+  Next:
+  1. astro.config.mjs:
+       build: { inlineStylesheets: 'never' },
+       vite: { build: { assetsInlineLimit: 0 } },
+       markdown: { syntaxHighlight: false },   // or a class-based highlighter
+  2. Edit the CONFIG block at the top of scripts/kekkai-postbuild.mjs (media/embed hosts, CMS folder${opt.admin ? ` — set to "${opt.admin}"` : ', or KEKKAI_ADMIN env'}).
+${buildNote ? buildNote + '\n' : ''}  3. Give kekkai-rules.md to whoever writes the code (you or your assistant) before the first component.
+  4. Before every release: kekkai . --forbid … ; npm run build ; kekkai ./dist${opt.admin ? ` --admin ${opt.admin}` : ''} ; deploy ; kekkai https://<site>${opt.admin ? ` --admin ${opt.admin}` : ''} --accept-edge-inline
+`);
+}
+
 // ───────────────────────────── run ─────────────────────────────
 const isDir = !/^https?:\/\//i.test(target) && existsSync(target) && statSync(target).isDirectory();
+if (opt.init) { await initProject(target || '.'); process.exit(0); }
 const isRepo = isDir && (opt.mode === 'repo' || (opt.mode !== 'dist' && existsSync(join(target, '.git')) && !existsSync(join(target, '_headers')) && !existsSync(join(target, 'index.html'))));
 if (isRepo) repoScan(target); else if (isDir) distScan(target); else await liveScan(target);
 

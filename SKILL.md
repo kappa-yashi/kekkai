@@ -1,6 +1,6 @@
 ---
 name: kekkai
-description: kekkai (結界) — static site boundary & disclosure check. Scans a live URL or a dist/ folder for strict security headers, a CSP that matches the actual HTML, stack disclosure in the output, exposed source maps and config files, robots/sitemap leaks, then walks through fixing what it finds. Use before a static site (Astro / Cloudflare Pages / Netlify) goes live, after any change to _headers or the CSP, or when asked "is this site hardened?".
+description: kekkai (結界) — static site boundary & disclosure check, and the build rules that make a site pass it. Two uses — (1) BUILDING: when starting or extending a static site (Astro / Cloudflare Pages / Netlify style), when adding headers, a CSP or a CMS, apply reference/build-rules.md while writing the code and scaffold the post-build script with `kekkai init`; (2) CHECKING: scan a live URL, a dist/ folder or a git repo for headers, CSP correctness, leaks, disclosure and AI footprint, then fix in the guide's order. Use before a site goes live, after any change to _headers or the CSP, or when asked "is this site hardened?".
 ---
 
 # kekkai (結界) — static site boundary & disclosure check
@@ -26,6 +26,25 @@ Two questions, opposite answers:
 - Astro is the reference stack; the checks are framework-agnostic.
 - Only scan sites you own or are allowed to test. The live scan is read-only
   GETs, but a handful of them probe well-known leak paths.
+
+## Two modes
+
+**Building.** Whenever the work is *writing* a static site on this stack (new
+project, new component, headers, CSP, CMS), read `reference/build-rules.md`
+first and write to it. The rules are DO/DON'T lines, one per check. Do not
+wait to be asked for a security review; a site written by the rules has
+nothing to fix later. At project start, run `node bin/kekkai.mjs init <dir>
+[--admin <cms-folder>]`: it scaffolds `scripts/kekkai-postbuild.mjs`
+(generates `dist/_headers` from the built HTML — one CSP block per route
+group, never under `/*` — plus `version.txt`, strips comments from served
+config files, refuses a `public/_headers`), appends the `.gitignore` block,
+copies the rules as `kekkai-rules.md`, and wires `npm run build`. Then apply
+the printed `astro.config.mjs` settings. If a feature collides with a rule,
+prefer the rule; if the feature must win, scope the exception to one
+directive and one origin and say why in the commit message, not in a public
+file.
+
+**Checking.** The workflow below.
 
 ## Workflow
 

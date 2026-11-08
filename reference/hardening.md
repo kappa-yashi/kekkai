@@ -505,7 +505,24 @@ stop publishing it: a label in the visible text, the address only in the
 `mailto:` href, and no dictionary-attack local parts (`info@`, `contact@`,
 `admin@`, `sales@`, `support@`, `hello@`).
 
-## 4.5 Production builds come from `main`, and only from `main`
+## 4.5 The edge injects scripts your CSP never approved
+
+Several Cloudflare features rewrite the HTML on the way out and add an
+**inline `<script>`**: Bot Fight Mode's *JavaScript Detections*
+(`window.__CF$cv$params` + `/cdn-cgi/challenge-platform/…`), Web Analytics
+with automatic setup, Rocket Loader. Under `script-src 'self'` the browser
+blocks it, every visitor gets a CSP error in the console, and the feature does
+nothing. Nothing in the repository shows this; only the live response does, and
+`dist/` scans pass. `kekkai <url>` reports it as an edge-injected inline script.
+
+The script carries a per-request value, so it cannot be hashed; allowing it
+needs a per-response nonce, which a static `_headers` file cannot provide. For
+a static site the right answer is to **turn the feature off** (Security ->
+Settings -> JavaScript detections; Web Analytics -> add the beacon yourself or
+not at all; Speed -> Rocket Loader off) and check Security -> Events afterwards
+that nothing you wanted blocked has stopped being blocked.
+
+## 4.6 Production builds come from `main`, and only from `main`
 
 Whatever goes online passes through a merge into `main` that a human does by
 hand. This is not a security hole in the strict sense; it is **control**: the
@@ -528,7 +545,7 @@ see what ships, one day something ships that should not have.
 - After every merge, one glance at Deployments: branch `main`.
 - End-to-end tests run **before** the merge, because the merge is the deploy.
 
-## 4.6 Account-wide toggles are not what you want
+## 4.7 Account-wide toggles are not what you want
 
 When a setting says "apply one account-wide policy across your Workers", two
 words should send you elsewhere: **account-wide** and **Workers**. For one
@@ -750,7 +767,7 @@ settings, which traps you fell into.
 - **Before every commit**, read the diff for keys and for references to them.
 - **On suspicion of a leak:** rotate first, immediately. Clean history after
   (7.5).
-- **Only `main` goes online**, through a merge (4.5).
+- **Only `main` goes online**, through a merge (4.6).
 
 ## 7.3 Places that slip
 

@@ -121,7 +121,16 @@ export function headersFile() { /* emit /*, cache blocks, then one CSP block per
 ```
 
 Do **not** also keep a `public/_headers`: two sources of truth, and one of them
-overwrites the other.
+overwrites the other. Make the build **fail** if `public/_headers` reappears.
+
+**Better still: derive the document path list from the build output.** A
+post-build script that walks `dist/**/*.html`, emits one CSP block per route
+(or per route group) and writes `_headers` closes two traps at once: no CSP
+under `/*` (Trap 1.3), and no new page can ship without a CSP, because the list
+is the output itself. The same script is the natural place to stamp
+`version.txt` (PART 3) from `CF_PAGES_COMMIT_SHA`, and to strip comments from
+any config file that is served publicly (a CMS `config.yml`), since those
+comments are read by everyone.
 
 ## Trap 1.1: the Access-Control-Allow-Origin wildcard
 
@@ -505,6 +514,12 @@ stop publishing it: a label in the visible text, the address only in the
 `mailto:` href, and no dictionary-attack local parts (`info@`, `contact@`,
 `admin@`, `sales@`, `support@`, `hello@`).
 
+Cloudflare's own paths (`/cdn-cgi/scripts/…`, the obfuscation decoder) are
+served by Cloudflare, **not** from your `_headers`, so they carry none of your
+headers. If HSTS matters there, turn it on at the zone (SSL/TLS -> Edge
+Certificates -> HSTS); its `includeSubDomains` then covers every subdomain in
+the DNS, so look at the DNS first.
+
 ## 4.5 The edge injects scripts your CSP never approved
 
 Several Cloudflare features rewrite the HTML on the way out and add an
@@ -641,6 +656,14 @@ usually needs `style-src 'unsafe-inline'`; that is acceptable **only** because
 it is scoped to the CMS path. Add `Cache-Control: no-store` and
 `X-Robots-Tag: noindex, nofollow, noarchive` on the same block.
 
+**Look inside the bundle, not only at the `<script>` tag.** A self-hosted CMS
+bundle can still `import()` helpers at runtime from a public CDN (syntax
+highlighters, EXIF parsers, Markdown converters, fonts). With
+`script-src 'self'` those loads are blocked and the feature breaks silently;
+with the CDN allowed, whoever controls the CDN controls the editor. Vendor the
+helpers as exact dependencies and patch the loader's base URL at build;
+`kekkai ./dist` reports runtime CDN references inside JavaScript.
+
 ## 6.2 Authentication without an OAuth proxy
 
 For a single editor, a Git host **fine-grained personal access token** avoids
@@ -723,7 +746,17 @@ CMS-managed folders unless that is the explicit task; pull right before
 committing code and rebase rather than force-push; keep a `.gitignore` for
 `node_modules/`, `dist/`, `.astro/`, `.env*`, and stage explicit paths.
 
-## 6.8 After adding a CMS, re-run PART 5
+## 6.8 The CMS config is public
+
+`config.yml` is fetched by the browser, so it is public to anyone who finds
+the admin path. It names the repository, branch and backend, which is
+tolerable (6.4). Its **comments** are not: "private repo", "auth goes through
+our Worker", "locally use the local backend" are reconnaissance. Strip
+comments from served config files at build. Keep one-off importers that write
+into the CMS content folders out of the repository (6.7); `kekkai ./repo`
+flags scripts that write where editors publish.
+
+## 6.9 After adding a CMS, re-run PART 5
 
 The admin bundle, its configuration file and the media folder are all new
 output. The config names the repository, the branch and the backend in plain

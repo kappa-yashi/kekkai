@@ -40,7 +40,8 @@ Two questions, opposite answers:
 
    `--json` for machine output, `--strict` to make warnings fail, `--no-probe`
    to skip the leak-path probes, `--pages N` to sample N inner pages,
-   `--no-history` to skip the git-history scan in repo mode.
+   `--no-history` to skip the git-history scan in repo mode, `--summary` for
+   failures and warnings only, `--out report.md` to keep the report.
 
    If the skill was installed without the script, fetch it from
    `https://github.com/kappa-yashi/kekkai` (`bin/kekkai.mjs`, zero
@@ -86,6 +87,9 @@ Two questions, opposite answers:
 | docs describe the security setup | policies, scopes, login method, app names, account emails are reconnaissance | docs say *where* it is configured, not *how* (PART 7.2–7.3) |
 | tracked `.env` / `settings.local.json` / `.claude/*.json` | local credentials in the repo | untrack, `.gitignore`, rotate |
 | developer HTML comment | TODO/password/admin notes shipped to every visitor | strip comments in the build |
+| comment in a served config file | `config.yml` is public; its comments describe the setup | strip comments at build (PART 6.8) |
+| runtime CDN load inside JS | `import()` from unpkg etc.; SRI cannot see it | vendor the helper, patch the loader (PART 6.1) |
+| script writes into CMS folders | re-running it overwrites editors' work | delete one-off importers (PART 6.7) |
 | AI-assistant footprint | `CLAUDE.md` / `.cursorrules` tracked, AI co-author trailers, "built with …" credit — read as "unreviewed, soft target" | git-ignore agent config, drop trailers, no tooling credit in public (PART 7.6) |
 | HSTS preload on | one-way door for the whole domain | keep only if it was a decision for this domain |
 | no `version.txt` | "is the new build live?" has no one-request answer | ship a `no-store` fingerprint (PART 3) |

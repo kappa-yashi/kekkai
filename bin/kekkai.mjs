@@ -15,6 +15,8 @@
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
 //   --accept-edge-inline  live: an inline script injected by the CDN (Cloudflare JS detections) is reported as info, not failure
+//   --out <file>        also write the report to a file (.json → JSON, .md → markdown, else plain text)
+//   --summary           print only warnings and failures, one line each, plus the counts
 //   --repo | --dist     force the mode for a folder (default: .git without index.html/_headers → repo, otherwise dist)
 //
 // Only scan sites you own or are allowed to test.
@@ -26,11 +28,16 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false };
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false };
+const KNOWN_FLAGS = ['--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
+const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
+  if (a.startsWith('-') && !KNOWN_FLAGS.includes(a)) { const [guess, score] = similar(a); console.error(`unknown option ${a}${score > 0.6 ? ` — did you mean ${guess}?` : ''}`); process.exit(2); }
   if (a === '--json') opt.json = true;
+  else if (a === '--out') opt.out = argv[++i] || '';
+  else if (a === '--summary') opt.summary = true;
   else if (a === '--strict') opt.strict = true;
   else if (a === '--no-probe') opt.probe = false;
   else if (a === '--no-history') opt.history = false;
@@ -52,7 +59,8 @@ function usage() {
   kekkai ./dist                       scan a build folder (+ _headers)
   kekkai ./repo                       scan a git working copy (auto-detected by .git)
 
-  --json  --strict  --no-probe  --no-history  --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N`);
+  --json  --summary  --out <file.md|.json|.txt>  --strict  --no-probe  --no-history
+  --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -130,9 +138,13 @@ const EMAIL_RE = /(^|[^/\w.-])([A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.([A-Z
 const TLDS = new Set('com net org io gr de uk co me eu info page dev app xyz gov edu fr it es nl be ch at se no fi dk pl cz pt ru ua ca us au nz jp cn in br mx ar tv cc ai cloud site online store tech email mail pro biz name studio design art blog ly sh to is im gg lol ie ro hu bg hr rs si sk lt lv ee tr il za kr tw hk sg my id th vn ph cy mt lu li'.split(' '));
 // --forbid terms match as whole tokens: "kframe" must not hit "checkFramebufferStatus", but "brand.com" and "brand-v2" still count.
 function hasForbidden(s, w) { return new RegExp(`(^|[^a-z0-9])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`, 'i').test(s); }
-function findEmails(s) {
+function findEmails(s, { skipLicense = false } = {}) {
   const out = new Set();
-  for (const m of s.matchAll(EMAIL_RE)) if (TLDS.has(m[3].toLowerCase())) out.add(m[2]);
+  for (const m of s.matchAll(EMAIL_RE)) {
+    if (!TLDS.has(m[3].toLowerCase())) continue;
+    if (skipLicense) { const ctx = s.slice(Math.max(0, m.index - 400), m.index); if (/@license|@author|copyright|\(c\)|©|\/\*!|SPDX-License|MIT License|Licensed under/i.test(ctx)) continue; }
+    out.add(m[2]);
+  }
   return [...out];
 }
 const TEXT_EXT = new Set(['.html', '.htm', '.xml', '.txt', '.json', '.js', '.mjs', '.css', '.svg', '.webmanifest', '.md', '.rss', '.atom']);
@@ -166,7 +178,7 @@ function findSecrets(s) {
 const STAGING_RE = /\b(?:[a-z0-9-]+\.(?:pages|workers)\.dev|[a-z0-9-]+\.netlify\.app|[a-z0-9-]+\.vercel\.app|[a-z0-9-]+\.github\.io|[a-z0-9-]+\.ngrok(?:-free)?\.app|(?:staging|stage|stg|dev|test|preview|beta)\.[a-z0-9-]+\.[a-z]{2,}|localhost:\d+|127\.0\.0\.1:\d+)\b/gi;
 function findStagingHosts(s) { return [...new Set([...s.matchAll(STAGING_RE)].map((m) => m[0]))]; }
 // Words that describe how the security is set up. In a changelog, a version page or a doc they tell an attacker what to look for.
-const SECURITY_VOCAB_RE = /\b(?:access polic(?:y|ies)|one-?time pin|otp login|oauth (?:app|proxy|client)|client[_ ]secret|fine-?grained (?:token|pat)|personal access token|token scopes?|api scopes?|service token|bypass rule|allowlist(?:ed)? (?:ip|email)s?|zero trust|cloudflare access|2fa enforced|rotated? (?:the )?(?:key|token|secret)|secret rotation|exposure fix|login method)\b/gi;
+const SECURITY_VOCAB_RE = /\b(?:access polic(?:y|ies)|one-?time pin|otp login|oauth (?:apps?|proxy|client)|client[_ ]secret|fine-?grained (?:token|pat)|personal access token|token scopes?|api scopes?|service token|bypass rule|allowlist(?:ed)? (?:ip|email)s?|zero trust|cloudflare access|2fa enforced|rotated? (?:the )?(?:key|token|secret)|secret rotation|exposure fix|login method)\b/gi;
 function findSecurityVocab(s) { return [...new Set([...s.matchAll(SECURITY_VOCAB_RE)].map((m) => m[0].toLowerCase()))]; }
 // HTML comments that carry developer notes.
 function findLeakyComments(html) {
@@ -182,6 +194,33 @@ function findLeakyComments(html) {
 const AI_FILE_RE = /(^|\/)(CLAUDE\.md|AGENTS\.md|GEMINI\.md|\.claude\/.*|\.cursor\/.*|\.cursorrules|\.cursorignore|\.windsurfrules|\.windsurf\/.*|\.clinerules|\.aider[^/]*|\.github\/copilot-instructions\.md|\.github\/instructions\/.*|copilot-instructions\.md|\.codeium\/.*|\.continue\/.*|\.roo\/.*|\.roomodes|\.kiro\/.*|\.vibe\/.*|llms-ctx\.txt)$/i;
 const AI_TEXT_RE = /\b(?:generated (?:with|by) (?:claude|chatgpt|gpt-?4o?|copilot|cursor|gemini|codex|windsurf|aider|devin|lovable|bolt\.new|v0\.dev)|co-authored-by:\s*(?:claude|copilot|chatgpt|gemini|cursor|codex|aider|devin)|(?:built|made|vibe-?coded|written) (?:entirely |mostly |largely )?(?:with|by|using) (?:claude|chatgpt|ai|an ai|copilot|cursor|gemini|codex|lovable|bolt\.new|v0\.dev)|🤖 generated|claude\.ai\/code\/|claude-session:|anthropic\.com\/claude-code|noreply@anthropic\.com)/i;
 function findAiFootprint(s) { const m = s.match(AI_TEXT_RE); return m ? m[0] : null; }
+
+// Comments in configuration files that are served publicly (a CMS config.yml, say). They are read by people, including the wrong ones.
+function findConfigComments(text, ext) {
+  const out = [];
+  const lineRe = ext === '.json5' || ext === '.js' ? /^\s*\/\/(.*)$|\/\*([\s\S]*?)\*\//gm : /(?:^|\s)#(.*)$/gm; // full-line and trailing comments
+  for (const m of text.matchAll(lineRe)) { const c = (m[1] ?? m[2] ?? '').trim(); if (c.length > 3) out.push(c); }
+  return out;
+}
+function configCommentFindings(text, ext) {
+  const hits = [];
+  for (const c of findConfigComments(text, ext)) {
+    const v = findSecurityVocab(c); const h = findStagingHosts(c); const f = opt.forbid.filter((w) => hasForbidden(c, w));
+    if (v.length || h.length || f.length || /\b(private(?: repo)?|worker|proxy|token|auth|local backend|npm run|localhost|staging|password|secret|todo|fixme)\b/i.test(c)) hits.push(c.slice(0, 90));
+  }
+  return hits;
+}
+// Hardcoded CDN hosts inside JavaScript: dynamic import(), fetch(), script injection. The SRI check only sees <script src>.
+const CDN_HOST_RE = /https?:\/\/(?:unpkg\.com|cdn\.jsdelivr\.net|esm\.sh|cdnjs\.cloudflare\.com|cdn\.skypack\.dev|ga\.jspm\.io|code\.jquery\.com|ajax\.googleapis\.com|stackpath\.bootstrapcdn\.com)[^\s"'`)]*/gi;
+function findCdnLoads(js) {
+  const out = new Set();
+  for (const m of js.matchAll(CDN_HOST_RE)) { try { const u = new URL(m[0]); out.add(u.host + u.pathname.split('/').slice(0, 2).join('/')); } catch { /* ignore */ } }
+  return [...out];
+}
+// Does any policy's script-src admit this host?
+function scriptSrcAllowsHost(policies, host) {
+  return policies.some((p) => (effective(p, 'script-src-elem') || []).some((t) => t === '*' || t === 'https:' || t.includes(host) || (t.startsWith('*.') && host.endsWith(t.slice(1)))));
+}
 
 // Run the three text scanners over one text blob and report under the current section.
 function checkDisclosureText(s, label, { html = false } = {}) {
@@ -248,7 +287,7 @@ function evaluateDoc(doc, policies) {
   if (doc.eventHandlers) r.handlersBlocked = policies.some((p) => !allowsInlineAttr(effective(p, 'script-src-attr')));
   return r;
 }
-const EDGE_RE = /__CF\$cv\$params|\/cdn-cgi\/challenge-platform\/|cloudflareinsights|rocket-loader|__cfRLUnblockHandlers/i;
+const EDGE_RE = /__CF\$cv\$params|\/cdn-cgi\/challenge-platform\/|\/cdn-cgi\/scripts\/|email-decode|__cf_email__|cloudflareinsights|rocket-loader|__cfRLUnblockHandlers/i;
 // Report the evaluation under the current section.
 function reportInline(doc, policies, label) {
   const ev = evaluateDoc(doc, policies);
@@ -490,8 +529,11 @@ async function liveScan(input) {
     if (hashed && !/immutable/i.test(acc)) info(`cache-${kind}`, `${kind} ${au.pathname} is content-hashed but not immutable (${acc || 'no Cache-Control'})`);
     else pass(`cache-${kind}`, `${kind} ${au.pathname}: ${acc || 'no Cache-Control'}`);
     checkAcao(ah, kind);
-    if (!ah['strict-transport-security']) warn(`hsts-${kind}`, `no HSTS on ${kind} responses (header only under document paths?)`);
-    if (!/nosniff/i.test(ah['x-content-type-options'] || '')) warn(`nosniff-${kind}`, `no nosniff on ${kind}`);
+    if (au.pathname.startsWith('/cdn-cgi/')) { if (!ah['strict-transport-security']) warn(`hsts-${kind}`, `${au.pathname} is served by Cloudflare itself, not from your _headers — it has no HSTS. Turn HSTS on at the zone (SSL/TLS → Edge Certificates); includeSubDomains there covers every subdomain, so check the DNS first.`); }
+    else {
+      if (!ah['strict-transport-security']) warn(`hsts-${kind}`, `no HSTS on ${kind} responses (header only under document paths?)`);
+      if (!/nosniff/i.test(ah['x-content-type-options'] || '')) warn(`nosniff-${kind}`, `no nosniff on ${kind}`);
+    }
     if (kind === 'script' || kind === 'stylesheet') {
       const mapRef = a.text.match(/[#@]\s*sourceMappingURL\s*=\s*(\S+)/)?.[1] || ah['sourcemap'] || ah['x-sourcemap'];
       if (mapRef) {
@@ -512,6 +554,29 @@ async function liveScan(input) {
     if (findSecurityVocab(r.text).length || findStagingHosts(r.text).length) warn('changelog', `/${p} is public even with noindex — write security-related entries neutrally ("housekeeping", "updated project notes")`);
   }
   if (!discl) pass('disclosure', 'no credential shapes, staging hosts or security-setup vocabulary in the document, its assets or version/changelog routes');
+  for (const au of assetUrls.filter((u) => /\.m?js$/i.test(u.pathname))) { const a = await get(au.href); const loads = findCdnLoads(a.text); if (loads.length) warn('js-cdn', `${au.pathname} references a public CDN at runtime (${loads.slice(0, 3).join(', ')}) — not visible to the SRI check; vendor it`); }
+  if (opt.admin) {
+    section('CMS');
+    const ai = await get(`${origin}/${opt.admin}/`);
+    if (ai.status !== 200) info('cms', `/${opt.admin}/ answers ${ai.status}`);
+    else {
+      const ah = ai.headers;
+      if (!/no-store/i.test(ah['cache-control'] || '')) warn('cms-cache', `/${opt.admin}/ is cacheable (${ah['cache-control'] || 'no Cache-Control'}) — the admin should be no-store`);
+      if (!/noindex/i.test(ah['x-robots-tag'] || '') && !/noindex/i.test(ai.text)) warn('cms-index', `/${opt.admin}/ carries no noindex (header or meta)`);
+      if (!ah['content-security-policy']) fail('cms-csp', `/${opt.admin}/ has no CSP header`);
+      const adoc = inspectHtml(ai.text);
+      const cross = adoc.external.filter((e) => { try { return new URL(e.url, finalUrl).origin !== finalUrl.origin; } catch { return false; } });
+      if (cross.length) fail('cms-cdn', `the admin page loads ${cross.length} cross-origin resource(s) (${cross.slice(0, 2).map((e) => e.url).join(', ')}) — whoever controls that host controls your publishing pipeline; self-host the bundle`);
+      else pass('cms-bundle', 'admin page loads only same-origin code');
+      for (const cfg of ['config.yml', 'config.yaml', 'config.json']) {
+        const r = await get(`${origin}/${opt.admin}/${cfg}`); if (r.status !== 200) continue;
+        const hits = configCommentFindings(r.text, extname(cfg));
+        if (hits.length) warn('cms-config-comments', `/${opt.admin}/${cfg}: ${hits.length} comment(s) that describe the setup, e.g. "${hits[0]}" — public file; strip comments at build`); else pass('cms-config', `/${opt.admin}/${cfg}: no telling comments`);
+        const repo = r.text.match(/repo:\s*([^\s#]+)/)?.[1]; if (repo) info('cms-repo', `config names the content repository ${repo} — fine only while that repo is private`);
+        break;
+      }
+    }
+  }
   section('AI footprint');
   const aiHits = [];
   const aiDoc = findAiFootprint(doc.text); if (aiDoc) aiHits.push(`document ("${aiDoc}")`);
@@ -668,6 +733,8 @@ function effectiveHeaders(path, rules) {
   return Object.fromEntries(Object.entries(h).map(([k, v]) => [k, v.length > 1 && k !== 'content-security-policy' ? v.join(', ') : (v.length === 1 ? v[0] : v)]));
 }
 
+let _rulesCache = null;
+function rulesFor(dir) { if (_rulesCache) return _rulesCache; const hf = join(dir, '_headers'); _rulesCache = existsSync(hf) ? parseHeadersFile(readFileSync(hf, 'utf8')) : []; return _rulesCache; }
 function distScan(dir) {
   const files = walk(dir).map((f) => ({ abs: f, rel: '/' + relative(dir, f).split(sep).join('/') }));
   section('Build output');
@@ -715,6 +782,23 @@ function distScan(dir) {
     scanned++; discl += checkDisclosureText(read(f), f.rel, { html: /\.html?$/.test(f.rel) });
   }
   if (!discl) pass('disclosure', `${scanned} text file(s): no credential shapes, staging hosts or security-setup vocabulary`);
+  // comments in publicly served config files (the --admin folder included: its config.yml is public)
+  const cfgFiles = files.filter((f) => /\.(ya?ml|toml|json5|ini|cfg|conf)$/i.test(f.rel));
+  let cfgHits = 0;
+  for (const f of cfgFiles) { const hits = configCommentFindings(read(f), extname(f.rel).toLowerCase()); if (hits.length) { cfgHits++; warn('config-comments', `${f.rel}: ${hits.length} comment(s) that describe the setup, e.g. "${hits[0]}" — this file is served to everyone; strip comments at build`); } }
+  if (cfgFiles.length && !cfgHits) pass('config-comments', `${cfgFiles.length} served config file(s) carry no telling comments`);
+  // CDN loads hidden inside JavaScript
+  const jsFiles = files.filter((f) => /\.m?js$/i.test(f.rel));
+  const distPolicies = [];
+  for (const f of files.filter((f) => /\.html?$/.test(f.rel))) { const h = effectiveHeaders(f.rel, rulesFor(dir)); if (h['content-security-policy']) for (const c of [].concat(h['content-security-policy'])) distPolicies.push(parseCsp(c)); for (const mc of inspectHtml(read(f)).metaCsps) distPolicies.push(parseCsp(mc)); }
+  let cdnHits = 0;
+  for (const f of jsFiles) {
+    const loads = findCdnLoads(read(f)); if (!loads.length) continue; cdnHits++;
+    const allowed = loads.filter((l) => scriptSrcAllowsHost(distPolicies, l.split('/')[0]));
+    if (allowed.length) fail('js-cdn', `${f.rel} loads code from a public CDN at runtime (${allowed.slice(0, 3).join(', ')}) and the CSP lets it run — whoever controls that host controls this page; vendor it`);
+    else warn('js-cdn', `${f.rel} references a public CDN at runtime (${loads.slice(0, 3).join(', ')}) — the CSP blocks it, so that feature breaks; vendor it or allow it on purpose`);
+  }
+  if (jsFiles.length && !cdnHits) pass('js-cdn', `${jsFiles.length} script file(s): no runtime loads from public CDNs`);
   section('AI footprint');
   const aiFiles = files.filter((f) => AI_FILE_RE.test(f.rel)).map((f) => f.rel);
   const aiText = [];
@@ -728,7 +812,7 @@ function distScan(dir) {
   for (const f of text) {
     const s = read(f);
     if (/\.html?$/.test(f.rel)) { for (const m of s.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) if (findEmails(m[1]).length) { emailFiles.push(f.rel + ' (inside <script>)'); break; } }
-    else if (f.rel !== '/_headers' && !/security\.txt$|humans\.txt$/.test(f.rel) && findEmails(s).length) emailFiles.push(f.rel);
+    else if (f.rel !== '/_headers' && !/security\.txt$|humans\.txt$/.test(f.rel) && findEmails(s, { skipLicense: true }).length) emailFiles.push(f.rel);
   }
   if (emailFiles.length) warn('email', `email addresses where obfuscation cannot reach: ${emailFiles.slice(0, 6).join(', ')}`); else pass('email', 'no email addresses in text files or inside <script>');
 
@@ -865,12 +949,13 @@ function repoScan(dir) {
 
   // .gitignore coverage
   const gi = existsSync(join(dir, '.gitignore')) ? readFileSync(join(dir, '.gitignore'), 'utf8') : '';
-  const want = [['.env', /^\s*\.env(\*|\.\*)?\s*$|^\s*\*?\.env\*/m], ['.dev.vars', /^\s*\.dev\.vars/m], ['node_modules', /^\s*\/?node_modules\/?\s*$/m], ['dist', /^\s*\/?dist\/?\s*$/m], ['.claude/settings.local.json', /settings\.local\.json|^\s*\.claude\/?\s*$/m]];
+  const want = [['.env', /^\s*\.env(\*|\.\*)?\s*$|^\s*\*?\.env\*/m], ['.dev.vars', /^\s*\.dev\.vars/m], ['node_modules', /^\s*\/?node_modules\/?\s*$/m], ['dist', /^\s*\/?dist\/?\s*$/m], ['local settings (*.local.json or the agent folder)', /settings\.local\.json|\*\.local\.json|\.local\.\*|^\s*\.(claude|cursor|windsurf)\/?\s*$/m]];
+  const excl = existsSync(join(dir, '.git', 'info', 'exclude')) ? readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8') : '';
   // (for a public repo, consider ignoring the whole .claude/, .cursor/ etc. — see the AI footprint section)
-  const missing = want.filter(([, re]) => !re.test(gi)).map(([n]) => n);
+  const missing = want.filter(([, re]) => !re.test(gi) && !re.test(excl)).map(([n]) => n);
   if (!gi) warn('gitignore', 'no .gitignore');
   else if (missing.length) warn('gitignore', `.gitignore does not cover: ${missing.join(', ')}`);
-  else pass('gitignore', '.gitignore covers .env*, .dev.vars, node_modules, dist, settings.local.json');
+  else pass('gitignore', '.gitignore (or .git/info/exclude) covers .env*, .dev.vars, node_modules, dist, local settings');
 
   // secrets and security vocabulary in tracked text files
   section('Working tree');
@@ -920,6 +1005,22 @@ function repoScan(dir) {
   if (aiParts.length) warn('ai-footprint', `the repository shows it was built with an AI assistant — ${aiParts.join('; ')}. For a public repo this is a targeting signal: keep agent config private (git-ignored or a separate private repo), drop the trailers, say nothing about the tooling (guide PART 7.6)`);
   else pass('ai-footprint', 'no AI-assistant config files, attribution or commit trailers');
 
+  // one-off scripts that write into CMS-managed content folders (guide 6.7: the repo is the content's source of truth)
+  section('CMS');
+  const readSafe = (f) => { try { return readFileSync(join(dir, f), 'utf8'); } catch { return ''; } };
+  const cmsCfg = tracked.find((f) => /(^|\/)config\.ya?ml$/.test(f) && /collections:/.test(readSafe(f)));
+  if (cmsCfg) {
+    const folders = [...new Set([...readSafe(cmsCfg).matchAll(/^\s*(?:folder|media_folder):\s*["']?([^"'\s#]+)/gm)].map((m) => m[1].replace(/^\/+|\/+$/g, '')))].filter(Boolean);
+    const writers = [];
+    for (const f of tracked.filter((f) => /\.(m?js|cjs|ts|py|sh)$/i.test(f) && !/(^|\/)(node_modules|dist|src\/pages|src\/components|src\/layouts)\//.test(f))) {
+      const t = readSafe(f);
+      if (!/writeFile|writeFileSync|open\([^)]*['"]w|>\s*\$?[A-Za-z_./]*\.md/.test(t)) continue;
+      const hit = folders.find((fo) => t.includes(fo)); if (hit) writers.push(`${f} → ${hit}`);
+    }
+    if (writers.length) warn('cms-writers', `script(s) write into CMS-managed folders: ${writers.slice(0, 4).join('; ')} — once editors publish from the CMS, a re-run overwrites their work (guide 6.7); delete one-off importers or move them out of the repo`);
+    else pass('cms-writers', `no script writes into the ${folders.length} CMS-managed folder(s) from ${cmsCfg}`);
+  }
+
   // history
   if (opt.history) {
     section('History');
@@ -945,8 +1046,17 @@ function repoScan(dir) {
     if (envFiles.length) fail('history-env', `env files were committed at some point: ${envFiles.slice(0, 4).join(', ')} — they are still in history; rotate and rewrite`);
     else pass('history-env', 'no .env / .dev.vars ever committed');
     const esc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const forbidden = opt.forbid.length ? git(dir, ['grep', '-l', '-i', '-I', '-E', `(^|[^a-zA-Z0-9])(${opt.forbid.map(esc).join('|')})([^a-zA-Z0-9]|$)`, ...revList.slice(0, 200)], { okStatus: [0, 1] }) : null;
-    if (opt.forbid.length) { const n = (forbidden || '').split('\n').filter(Boolean).length; if (n) warn('history-forbid', `forbidden strings appear in history (${n} path(s))`); else pass('history-forbid', 'forbidden strings never appear in history'); }
+    if (opt.forbid.length) {
+      const details = [];
+      for (const w of opt.forbid) {
+        const paths = (git(dir, ['grep', '-l', '-i', '-I', '-E', `(^|[^a-zA-Z0-9])${esc(w)}([^a-zA-Z0-9]|$)`, ...revList.slice(0, 200)], { okStatus: [0, 1] }) || '').split('\n').filter(Boolean);
+        if (!paths.length) continue;
+        const files = [...new Set(paths.map((l) => l.replace(/^[0-9a-f]{7,40}:/, '')))];
+        const last = (git(dir, ['log', '--all', '-1', '--format=%h %ad', '--date=short', '-i', `-S${w}`]) || '').trim();
+        details.push(`"${w}": ${files.length} file(s) e.g. ${files[0]}${last ? `, last touched ${last}` : ''}`);
+      }
+      if (details.length) warn('history-forbid', `forbidden strings in history — ${details.join('; ')}. Still in HEAD? fix the file. Only in history? decide whether a rewrite is worth it.`); else pass('history-forbid', 'forbidden strings never appear in history');
+    }
   }
   const remote = (git(dir, ['remote', 'get-url', 'origin']) || '').trim();
   if (remote) { section('Repository'); info('remote', `origin: ${remote.replace(/\/\/[^@]+@/, '//***@')}${/github\.com/.test(remote) ? ' — if the site has a CMS or drafts, this repo must be private; check forks = 0 before any history rewrite' : ''}`); }
@@ -960,21 +1070,35 @@ if (isRepo) repoScan(target); else if (isDir) distScan(target); else await liveS
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
 for (const r of results) counts[r.level]++;
 const failed = counts.fail > 0 || (opt.strict && counts.warn > 0);
-if (opt.json) {
-  console.log(JSON.stringify({ target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: !failed, results }, null, 2));
-} else {
-  const tty = process.stdout.isTTY;
-  const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
+const mode = isRepo ? 'repository' : isDir ? 'build output' : 'live';
+const again = isRepo ? 'then scan the build and the live site' : 'then run again against the LIVE response';
+const verdict = failed ? `BOUNDARY BROKEN — fix the ✖ items, ${again}.` : isRepo ? 'BOUNDARY HOLDS — repository clean. Next: scan dist/ and the live site.' : 'BOUNDARY HOLDS — no failures. Re-run after deploy: the live response is the only truth.';
+const plainMark = { pass: '✔', warn: '!', fail: '✖', info: '·' };
+function render(fmt, color) {
+  const c = (code, s) => (color ? `\x1b[${code}m${s}\x1b[0m` : s);
   const mark = { pass: c(32, '✔'), warn: c(33, '!'), fail: c(31, '✖'), info: c(90, '·') };
-  let last = '';
-  console.log(`\nkekkai (結界) — ${isRepo ? 'repository' : isDir ? 'build output' : 'live'} scan of ${target}\n`);
-  for (const r of results) {
-    if (r.section !== last) { console.log(c(1, `  ${r.section}`)); last = r.section; }
-    console.log(`    ${mark[r.level]} ${r.msg}`);
-    if (r.detail && r.level !== 'pass') for (const l of String(r.detail).split('\n')) console.log(c(90, `        ${l}`));
+  const shown = opt.summary ? results.filter((r) => r.level === 'fail' || r.level === 'warn') : results;
+  const lines = [];
+  if (fmt === 'md') {
+    lines.push(`# kekkai (結界) — ${mode} scan of ${target}`, '', `**${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info** — ${verdict}`, '');
+    let last = ''; for (const r of shown) { if (r.section !== last) { lines.push('', `## ${r.section}`, ''); last = r.section; } lines.push(`- ${plainMark[r.level]} ${r.msg}${r.detail && r.level !== 'pass' ? `\n  \`${String(r.detail).replace(/\n/g, ' ')}\`` : ''}`); }
+    return lines.join('\n') + '\n';
   }
-  console.log(`\n  ${c(32, counts.pass + ' pass')}  ${c(33, counts.warn + ' warn')}  ${c(31, counts.fail + ' fail')}  ${c(90, counts.info + ' info')}`);
-  const again = isRepo ? 'then scan the build and the live site' : 'then run again against the LIVE response';
-  console.log(failed ? c(31, `\n  BOUNDARY BROKEN — fix the ✖ items, ${again}.\n`) : c(32, isRepo ? '\n  BOUNDARY HOLDS — repository clean. Next: scan dist/ and the live site.\n' : '\n  BOUNDARY HOLDS — no failures. Re-run after deploy: the live response is the only truth.\n'));
+  lines.push('', `kekkai (結界) — ${mode} scan of ${target}`, '');
+  let last = '';
+  for (const r of shown) {
+    if (!opt.summary && r.section !== last) { lines.push(c(1, `  ${r.section}`)); last = r.section; }
+    lines.push(`    ${mark[r.level]} ${opt.summary ? `[${r.section}] ` : ''}${r.msg}`);
+    if (!opt.summary && r.detail && r.level !== 'pass') for (const l of String(r.detail).split('\n')) lines.push(c(90, `        ${l}`));
+  }
+  lines.push('', `  ${c(32, counts.pass + ' pass')}  ${c(33, counts.warn + ' warn')}  ${c(31, counts.fail + ' fail')}  ${c(90, counts.info + ' info')}`, '', `  ${c(failed ? 31 : 32, verdict)}`, '');
+  return lines.join('\n');
+}
+const jsonOut = () => JSON.stringify({ target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: !failed, results }, null, 2);
+if (opt.json) console.log(jsonOut()); else console.log(render('text', process.stdout.isTTY));
+if (opt.out) {
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(opt.out, opt.out.endsWith('.json') ? jsonOut() : opt.out.endsWith('.md') ? render('md', false) : render('text', false));
+  console.error(`report written to ${opt.out}`);
 }
 process.exit(failed ? 1 : 0);

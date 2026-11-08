@@ -66,6 +66,10 @@ or clone and run `node bin/kekkai.mjs <target>`.
   `/version` / `/changelog` routes; staging and preview hosts; vocabulary that
   describes the security setup; developer comments left in the HTML
 - `/version.txt` build fingerprint and whether it is `no-store`
+- with `--admin`: the CMS page (`no-store`, `noindex`, CSP, only same-origin
+  code) and its public `config.yml` (telling comments, repository named)
+- runtime CDN references inside the page's own JavaScript
+- `/cdn-cgi/` assets recognised as Cloudflare-served, with the zone-level HSTS hint
 
 **Build folder** (`dist/` with its `_headers`)
 
@@ -88,6 +92,11 @@ or clone and run `node bin/kekkai.mjs <target>`.
 - `_redirects` parsed: open redirects (`https://:splat`), staging / preview
   hosts, proxy rules to another origin, hostname rules that Pages cannot match
 - the same disclosure scan over every text file of the output
+- comments in publicly served config files (`.yml`, `.toml`, `.json5`, the CMS
+  `config.yml` included) that describe the setup
+- runtime loads from public CDNs hidden inside JavaScript (`import()`,
+  `fetch()` of unpkg / jsdelivr / esm.sh / cdnjs …): failure when the CSP lets
+  them run, warning when it blocks them (that feature is broken)
 - **AI footprint** (every mode, warning): agent config files (`CLAUDE.md`,
   `.claude/`, `.cursorrules`, `copilot-instructions.md` …) tracked or served,
   AI co-author / generator commit trailers, "built with …" attribution in
@@ -108,11 +117,17 @@ or clone and run `node bin/kekkai.mjs <target>`.
   committed at any point, `--forbid` strings in history (`--no-history` skips)
 - current branch and remote, with a reminder that production builds come
   from `main` only
+- scripts that write into CMS-managed content folders (editors' work would be
+  overwritten)
+- `--forbid` hits in history reported per string with file count and the last
+  commit that touched them
 
 ## Options
 
 ```
 --json              machine-readable output
+--summary           only warnings and failures, one line each, plus counts
+--out <file>        also write the report (.json / .md / .txt)
 --strict            warnings count as failures (exit 1)
 --no-probe          live: skip the leak-path probes
 --pages N           live: sample N inner pages from the sitemap (default 5)
@@ -146,7 +161,9 @@ or add it to your project's skills.
 - Not a vulnerability scanner for server-side applications.
 - Cannot see your host dashboard (bot rules, Access policies, managed
   robots.txt); it only observes the effects.
-- Nonces cannot be verified statically.
+- Unknown options exit with code 2 and a suggestion; a target never starts with `-`.
+- Emails inside licence/copyright headers of vendored code are not reported.
+- Nonces inside `<meta>` CSPs are not honoured by browsers; header nonces are verified against the element's `nonce=` attribute.
 - Credential detection is by shape; a secret that looks like plain text is
   invisible to it, and a hit is not proof the key is still valid. Rotate anyway.
 - Only scan sites you own or are allowed to test.

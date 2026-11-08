@@ -1,6 +1,6 @@
 ---
 name: kekkai
-description: kekkai (結界) — static site boundary & disclosure check, and the build rules that make a site pass it. Two uses — (1) BUILDING: when starting or extending a static site (Astro / Cloudflare Pages / Netlify style), when adding headers, a CSP or a CMS, apply reference/build-rules.md while writing the code and scaffold the post-build script with `kekkai init`; (2) CHECKING: scan a live URL, a dist/ folder or a git repo for headers, CSP correctness, leaks, disclosure and AI footprint, then fix in the guide's order. Use before a site goes live, after any change to _headers or the CSP, or when asked "is this site hardened?".
+description: "kekkai (結界) — static site boundary & disclosure check, and the build rules that make a site pass it. Two uses — (1) BUILDING: when starting or extending a static site (Astro / Cloudflare Pages / Netlify style), when adding headers, a CSP or a CMS, apply reference/build-rules.md while writing the code and scaffold the post-build script with `kekkai init`; (2) CHECKING: scan a live URL, a dist/ folder or a git repo for headers, CSP correctness, leaks, disclosure and AI footprint, then fix in the guide's order. Use before a site goes live, after any change to _headers or the CSP, or when asked \"is this site hardened?\"."
 ---
 
 # kekkai (結界) — static site boundary & disclosure check

@@ -625,7 +625,11 @@ function distScan(dir) {
   for (const f of text) {
     if (f.rel === '/_headers') continue;
     const s = read(f);
-    for (const m of s.matchAll(/(\/home\/[a-z0-9_-]+\/|\/Users\/[A-Za-z0-9_-]+\/|[A-Z]:\\Users\\[A-Za-z0-9_-]+\\)/g)) pathHits.set(m[1], f.rel);
+    for (const m of s.matchAll(/(\/home\/([a-z0-9_-]+)\/|\/Users\/([A-Za-z0-9_-]+)\/|[A-Z]:\\Users\\([A-Za-z0-9_-]+)\\)/g)) {
+      const user = (m[2] || m[3] || m[4] || '').toLowerCase();
+      if (/^(x|xx|you|me|user|username|name|yourname|your-name|someone|example|foo|bar|\$\{?.*)$/.test(user) || user.length < 3) continue; // documentation placeholders
+      pathHits.set(m[1], f.rel);
+    }
   }
   if (pathHits.size) fail('local-paths', `local filesystem paths in the output: ${[...pathHits].map(([p, f]) => `${p} (${f})`).slice(0, 5).join(', ')}`); else pass('local-paths', 'no local filesystem paths');
   if (opt.forbid.length) {

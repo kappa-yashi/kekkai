@@ -82,6 +82,10 @@ or clone and run `node bin/kekkai.mjs <target>`.
 - `_redirects` parsed: open redirects (`https://:splat`), staging / preview
   hosts, proxy rules to another origin, hostname rules that Pages cannot match
 - the same disclosure scan over every text file of the output
+- **AI footprint** (every mode, warning): agent config files (`CLAUDE.md`,
+  `.claude/`, `.cursorrules`, `copilot-instructions.md` …) tracked or served,
+  AI co-author / generator commit trailers, "built with …" attribution in
+  output or docs — not a vulnerability, a targeting signal
 
 **Repository** (a git working copy; detected by `.git`)
 

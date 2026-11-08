@@ -85,6 +85,7 @@ Two questions, opposite answers:
 | docs describe the security setup | policies, scopes, login method, app names, account emails are reconnaissance | docs say *where* it is configured, not *how* (PART 7.2–7.3) |
 | tracked `.env` / `settings.local.json` / `.claude/*.json` | local credentials in the repo | untrack, `.gitignore`, rotate |
 | developer HTML comment | TODO/password/admin notes shipped to every visitor | strip comments in the build |
+| AI-assistant footprint | `CLAUDE.md` / `.cursorrules` tracked, AI co-author trailers, "built with …" credit — read as "unreviewed, soft target" | git-ignore agent config, drop trailers, no tooling credit in public (PART 7.6) |
 | HSTS preload on | one-way door for the whole domain | keep only if it was a decision for this domain |
 | no `version.txt` | "is the new build live?" has no one-request answer | ship a `no-store` fingerprint (PART 3) |
 

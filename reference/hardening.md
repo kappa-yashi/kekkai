@@ -823,7 +823,38 @@ backend for everyone who has access.
 8. The deploy from `main` runs again; with the same tree at the tip, the
    site does not change.
 
-## 7.6 Quick checks
+## 7.6 The AI footprint
+
+This one is not a vulnerability and it is said with regret. Code written with
+AI assistants is new, and like everything new it ships with bugs and gaps; a
+visible sign that a project was built that way is now read as "probably
+unreviewed, probably soft", and such projects are being picked as targets.
+Hiding the sign fixes nothing in the code; review and tests do that. But a
+public repo or site does not have to volunteer the hint.
+
+What gives it away, and what `kekkai` looks for:
+
+- **Agent configuration files tracked in a public repo:** `CLAUDE.md`,
+  `AGENTS.md`, `GEMINI.md`, `.claude/`, `.cursor/`, `.cursorrules`,
+  `.windsurfrules`, `.clinerules`, `.aider*`, `.github/copilot-instructions.md`
+  and relatives. They are useful; keep them **git-ignored**, or in a separate
+  private repo, or in the agent's own project settings. If one must be
+  tracked, it says how to build and test, not what the weak spots are.
+- **Commit trailers and PR footers:** `Co-Authored-By: <assistant> …`,
+  `🤖 Generated with …`, session links. Remove them from the commit template;
+  for an existing history, squash or rewrite (7.5) before the repo goes
+  public.
+- **Attribution in output and docs:** a "built with <assistant>" line, a
+  generator meta naming the tool, a `humans.txt` crediting it.
+- **Served agent files:** `/CLAUDE.md`, `/AGENTS.md`, `/.cursorrules` or
+  `/llms-ctx.txt` answering 200 on the live site, usually because the whole
+  repo root was published.
+
+`kekkai` reports all of this as a warning, in every mode. The remedy is the
+same everywhere: say nothing about the tooling in anything public, and let
+the code be judged on the review it actually got.
+
+## 7.7 Quick checks
 
 ```bash
 # settings or credential files tracked
@@ -834,7 +865,7 @@ git grep -nIE "AKIA[0-9A-Z]{16}|BEGIN (RSA|EC|OPENSSH) PRIVATE|gh[pousr]_[A-Za-z
 git grep -nIiE "access polic|one-time pin|client secret|token scope|oauth app" -- '*.md' '*.ts' '*.mjs' '*.astro'
 ```
 
-`kekkai ./repo` does the three of them, plus `.gitignore` coverage, tracked
+`kekkai ./repo` does the three of them, plus the AI footprint (7.6), `.gitignore` coverage, tracked
 `.env` / `.dev.vars` / local settings, env files anywhere in history, docs
 that name account emails or staging hosts, and comments that describe a
 credential's shape.
@@ -874,6 +905,8 @@ output and the live response, never your intention.**
       tracked `.env` / local settings, docs describe *where* security is
       configured and not *how*, no account emails or staging hosts in docs
 - [ ] Public changelog / version page carries no security details or staging hosts
+- [ ] No AI-assistant footprint in public repo or output: agent config git-ignored,
+      no AI co-author trailers, no "built with …" credit
 - [ ] 2FA on every account with access; preview access removed after release;
       locks scoped to exact hosts
 - [ ] `kekkai` live scan green after deploy

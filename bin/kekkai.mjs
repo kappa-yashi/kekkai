@@ -164,6 +164,12 @@ function findLeakyComments(html) {
   }
   return out;
 }
+// AI-tooling footprint. Not a vulnerability: a targeting signal. Projects visibly built with AI assistants
+// are being picked as soft targets on the assumption that the code shipped unreviewed.
+const AI_FILE_RE = /(^|\/)(CLAUDE\.md|AGENTS\.md|GEMINI\.md|\.claude\/.*|\.cursor\/.*|\.cursorrules|\.cursorignore|\.windsurfrules|\.windsurf\/.*|\.clinerules|\.aider[^/]*|\.github\/copilot-instructions\.md|\.github\/instructions\/.*|copilot-instructions\.md|\.codeium\/.*|\.continue\/.*|\.roo\/.*|\.roomodes|\.kiro\/.*|\.vibe\/.*|llms-ctx\.txt)$/i;
+const AI_TEXT_RE = /\b(?:generated (?:with|by) (?:claude|chatgpt|gpt-?4o?|copilot|cursor|gemini|codex|windsurf|aider|devin|lovable|bolt\.new|v0\.dev)|co-authored-by:\s*(?:claude|copilot|chatgpt|gemini|cursor|codex|aider|devin)|(?:built|made|vibe-?coded|written) (?:entirely |mostly |largely )?(?:with|by|using) (?:claude|chatgpt|ai|an ai|copilot|cursor|gemini|codex|lovable|bolt\.new|v0\.dev)|🤖 generated|claude\.ai\/code\/|claude-session:|anthropic\.com\/claude-code|noreply@anthropic\.com)/i;
+function findAiFootprint(s) { const m = s.match(AI_TEXT_RE); return m ? m[0] : null; }
+
 // Run the three text scanners over one text blob and report under the current section.
 function checkDisclosureText(s, label, { html = false } = {}) {
   const sec = findSecrets(s);
@@ -442,6 +448,13 @@ async function liveScan(input) {
     if (findSecurityVocab(r.text).length || findStagingHosts(r.text).length) warn('changelog', `/${p} is public even with noindex — write security-related entries neutrally ("housekeeping", "updated project notes")`);
   }
   if (!discl) pass('disclosure', 'no credential shapes, staging hosts or security-setup vocabulary in the document, its assets or version/changelog routes');
+  section('AI footprint');
+  const aiHits = [];
+  const aiDoc = findAiFootprint(doc.text); if (aiDoc) aiHits.push(`document ("${aiDoc}")`);
+  if (/<meta[^>]+generator[^>]+(?:claude|chatgpt|copilot|cursor|lovable|bolt|v0)/i.test(doc.text)) aiHits.push('generator meta names an AI tool');
+  for (const p of ['humans.txt', 'CLAUDE.md', 'AGENTS.md', '.cursorrules', 'llms-ctx.txt']) { const r = await get(`${origin}/${p}`); if (r.status === 200 && r.body.length && (p === 'humans.txt' ? findAiFootprint(r.text) : !/html/i.test(r.headers['content-type'] || ''))) aiHits.push(`/${p} is served`); }
+  if (aiHits.length) warn('ai-footprint', `the site advertises that it was built with an AI assistant: ${aiHits.join(', ')} — projects that visibly ship AI-written code are being picked as soft targets; keep the credit out of public output (guide PART 7.6)`);
+  else pass('ai-footprint', 'no AI-assistant attribution in public output');
 
   // SVG files referenced by the document (as <img>/<object>/<use>): scripts inside them run when embedded as <object>/inline
   const svgSeen = new Set();
@@ -632,6 +645,12 @@ function distScan(dir) {
     scanned++; discl += checkDisclosureText(read(f), f.rel, { html: /\.html?$/.test(f.rel) });
   }
   if (!discl) pass('disclosure', `${scanned} text file(s): no credential shapes, staging hosts or security-setup vocabulary`);
+  section('AI footprint');
+  const aiFiles = files.filter((f) => AI_FILE_RE.test(f.rel)).map((f) => f.rel);
+  const aiText = [];
+  for (const f of text) { if (f.rel === '/_headers' || (opt.admin && f.rel.startsWith(`/${opt.admin}/`))) continue; const m = findAiFootprint(read(f)); if (m) aiText.push(`${f.rel} ("${m}")`); if (aiText.length >= 5) break; }
+  if (aiFiles.length || aiText.length) warn('ai-footprint', `AI-assistant footprint in the output: ${[...aiFiles, ...aiText].slice(0, 6).join(', ')} — a targeting signal; strip it from what ships (guide PART 7.6)`);
+  else pass('ai-footprint', 'no AI-assistant attribution or config files in the output');
   section('Build output');
 
   // emails in non-HTML text files and inside <script>
@@ -774,6 +793,7 @@ function repoScan(dir) {
   // .gitignore coverage
   const gi = existsSync(join(dir, '.gitignore')) ? readFileSync(join(dir, '.gitignore'), 'utf8') : '';
   const want = [['.env', /^\s*\.env(\*|\.\*)?\s*$|^\s*\*?\.env\*/m], ['.dev.vars', /^\s*\.dev\.vars/m], ['node_modules', /^\s*\/?node_modules\/?\s*$/m], ['dist', /^\s*\/?dist\/?\s*$/m], ['.claude/settings.local.json', /settings\.local\.json|^\s*\.claude\/?\s*$/m]];
+  // (for a public repo, consider ignoring the whole .claude/, .cursor/ etc. — see the AI footprint section)
   const missing = want.filter(([, re]) => !re.test(gi)).map(([n]) => n);
   if (!gi) warn('gitignore', 'no .gitignore');
   else if (missing.length) warn('gitignore', `.gitignore does not cover: ${missing.join(', ')}`);
@@ -812,6 +832,19 @@ function repoScan(dir) {
   }
   if (comments.length) warn('code-comments', `comments that describe credentials or their shape: ${comments.slice(0, 3).join(' | ')} — a comment like "token (prefix …), server-side" is a search hint`);
   else pass('code-comments', 'no comments describing credentials');
+
+  // AI footprint in the repository
+  section('AI footprint');
+  const aiTracked = tracked.filter((f) => AI_FILE_RE.test(f));
+  const aiDocs = [];
+  for (const f of textish.filter((f) => /\.(md|mdx|txt|json|html)$/i.test(f) && !AI_FILE_RE.test(f))) { let s; try { s = readFileSync(join(dir, f), 'utf8'); } catch { continue; } const m = findAiFootprint(s); if (m) aiDocs.push(`${f} ("${m}")`); if (aiDocs.length >= 4) break; }
+  const aiCommits = (git(dir, ['log', '--all', '-i', '-E', '--grep=co-authored-by: *(claude|copilot|chatgpt|gemini|cursor|codex|aider|devin)|generated with \\[?claude|🤖 generated|claude-session:|anthropic\\.com', '--format=%h'], { okStatus: [0, 1] }) || '').split('\n').filter(Boolean);
+  const aiParts = [];
+  if (aiTracked.length) aiParts.push(`config files: ${aiTracked.slice(0, 4).join(', ')}`);
+  if (aiDocs.length) aiParts.push(`attribution in docs: ${aiDocs.slice(0, 2).join('; ')}`);
+  if (aiCommits.length) aiParts.push(`${aiCommits.length} commit(s) with AI co-author / generator trailers`);
+  if (aiParts.length) warn('ai-footprint', `the repository shows it was built with an AI assistant — ${aiParts.join('; ')}. For a public repo this is a targeting signal: keep agent config private (git-ignored or a separate private repo), drop the trailers, say nothing about the tooling (guide PART 7.6)`);
+  else pass('ai-footprint', 'no AI-assistant config files, attribution or commit trailers');
 
   // history
   if (opt.history) {

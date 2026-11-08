@@ -38,8 +38,14 @@ or clone and run `node bin/kekkai.mjs <target>`.
   Permissions-Policy, COOP, CORP
 - `Access-Control-Allow-Origin: *` on documents **and** assets
 - Server / X-Powered-By version disclosure, `<meta name="generator">`
-- inline `<script>` vs the CSP: every hash recomputed, blocked scripts
-  reported; `style=""` vs `style-src`
+- inline `<script>` / `<style>` / `style=""` / `on*=` vs the CSP, evaluated the
+  way a browser does: every policy on the response (header(s) **and** `<meta>`)
+  enforced independently and intersected; `script-src-elem/attr` → `script-src`
+  → `default-src` fallbacks; sha256/384/512 hashes recomputed on the exact
+  element text; `nonce=` attributes checked against the policy;
+  `'unsafe-inline'` ignored when hashes or nonces are present; attributes need
+  `'unsafe-hashes'`. A CDN-injected inline script (per-request token, cannot be
+  hashed) is a warning, not a failure
 - JSON-LD parses; email addresses inside JSON-LD or text files (where email
   obfuscation cannot reach)
 - third-party script origins; **Subresource Integrity** on every cross-origin
@@ -111,7 +117,7 @@ or clone and run `node bin/kekkai.mjs <target>`.
 --no-probe          live: skip the leak-path probes
 --pages N           live: sample N inner pages from the sitemap (default 5)
 --no-history        repo: skip the git-history scan
---accept-edge-inline  live: a CDN-injected inline script (Cloudflare JS detections) is info, not failure
+--accept-edge-inline  a CDN-injected inline script (Cloudflare JS detections) is info instead of warning
 --repo | --dist     force the mode for a folder
 --admin <folder>    dist: the CMS/admin folder name
 --forbid a,b,c      strings that must not appear in the output

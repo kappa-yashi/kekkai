@@ -69,7 +69,8 @@ Two questions, opposite answers:
 |---|---|---|
 | CSP missing on an inner page | the route is not in the `_headers` path list | add the path pattern; make the build check coverage (PART 5) |
 | N CSP policies on one response | a `/*` rule **and** a path rule — rules are additive, browsers enforce the intersection | never put a CSP under `/*` when any path has its own |
-| inline script not allowed by CSP | the browser blocks it (Strategy B) or a hash is stale (Strategy A) | move it to a bundled/external file, or regenerate hashes on every build |
+| inline script not allowed by CSP | the browser blocks it (Strategy B) or a hash is stale (Strategy A); a trailing newline changes the hash | move it to a bundled/external file, or regenerate hashes on every build |
+| edge-injected inline script (warning) | the CDN added it; per-request token, cannot be hashed; the CSP blocks it | turn the CDN feature off, or accept it (`--accept-edge-inline`) |
 | `style=""` but `style-src 'self'` | styles are silently dropped | data attributes + CSS, or CSSOM from an allowed script |
 | `Access-Control-Allow-Origin: *` | any site's JS may read your responses | remove it (`! Access-Control-Allow-Origin` on Pages) or set your own origin; **verify live**, the removal is not always honoured |
 | `frame-ancestors` in a `<meta>` CSP | ignored by browsers | it must be a real header |

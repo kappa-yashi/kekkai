@@ -74,14 +74,15 @@ function parseCsp(policy) {
     const toks = part.trim().split(/\s+/).filter(Boolean);
     if (!toks.length) continue;
     const name = toks[0].toLowerCase();
-    if (!(name in d)) d[name] = toks.slice(1).map((t) => t.toLowerCase().startsWith("'") ? t.toLowerCase() : t);
+    // keywords are case-insensitive; hashes and nonces are base64 and must keep their case
+    if (!(name in d)) d[name] = toks.slice(1).map((t) => (t.startsWith("'") && !/^'(sha(256|384|512)|nonce)-/i.test(t)) ? t.toLowerCase() : t.replace(/^'(sha(256|384|512)|nonce)-/i, (m) => m.toLowerCase()));
   }
   return d;
 }
 
 // Executable inline scripts, inline style attributes and misc facts about one HTML document.
 function inspectHtml(html) {
-  const out = { inlineScripts: [], externalScripts: [], external: [], eventHandlers: 0, svgInline: 0, svgScripts: 0, svgStyles: 0, svgRefs: [], styleAttrs: 0, styleTags: 0, jsonld: [], jsonldErrors: [], metaCsp: null, generator: null, canonical: null, title: '' };
+  const out = { inlineScripts: [], externalScripts: [], external: [], eventHandlers: 0, svgInline: 0, svgScripts: 0, svgStyles: 0, svgRefs: [], styleAttrs: 0, styleTags: 0, styleTagBodies: [], jsonld: [], jsonldErrors: [], metaCsp: null, metaCsps: [], generator: null, canonical: null, title: '' };
   for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
     const attrs = m[1], body = m[2];
     const type = (attrs.match(/\btype\s*=\s*["']?([^"'\s>]*)/i)?.[1] || '').toLowerCase();
@@ -89,8 +90,9 @@ function inspectHtml(html) {
     if (type === 'application/ld+json') { out.jsonld.push(body); try { JSON.parse(body); } catch (e) { out.jsonldErrors.push(String(e.message)); } continue; }
     if (type && !['text/javascript', 'application/javascript', 'module', 'text/module'].includes(type)) continue;
     if (src) { out.externalScripts.push(src); out.external.push({ kind: 'script', url: src, integrity: /\bintegrity\s*=/i.test(attrs), crossorigin: /\bcrossorigin\b/i.test(attrs) }); }
-    else out.inlineScripts.push(body);
+    else out.inlineScripts.push({ body, nonce: attrs.match(/\bnonce\s*=\s*["']?([^"'\s>]*)/i)?.[1] || null });
   }
+  for (const m of html.matchAll(/<style\b([^>]*)>([\s\S]*?)<\/style>/gi)) out.styleTagBodies.push({ body: m[2], nonce: m[1].match(/\bnonce\s*=\s*["']?([^"'\s>]*)/i)?.[1] || null });
   for (const m of html.matchAll(/<link\b([^>]*)>/gi)) {
     const attrs = m[1];
     if (!/\brel\s*=\s*["']?(stylesheet|modulepreload)\b/i.test(attrs)) continue;
@@ -110,8 +112,12 @@ function inspectHtml(html) {
   for (const m of html.matchAll(/<(?:img|object|embed|use|image)\b[^>]*\b(?:src|data|href|xlink:href)\s*=\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi)) out.svgRefs.push(m[1]);
   out.styleAttrs = (html.match(/<[a-z][^>]*\sstyle\s*=\s*["']/gi) || []).length;
   out.styleTags = (html.match(/<style\b/gi) || []).length;
-  const meta = html.match(/<meta[^>]+http-equiv\s*=\s*["']content-security-policy["'][^>]*>/i)?.[0];
-  if (meta) out.metaCsp = meta.match(/\bcontent\s*=\s*["']([^"']*)["']/i)?.[1] || '';
+  for (const m of html.matchAll(/<meta[^>]+http-equiv\s*=\s*["']content-security-policy["'][^>]*>/gi)) {
+    const cm = m[0].match(/\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i); // the value itself contains 'self' quotes: match the delimiter, not any quote
+    const c = cm ? (cm[1] ?? cm[2]) : undefined;
+    if (c !== undefined) out.metaCsps.push(c.replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&'));
+  }
+  out.metaCsp = out.metaCsps.length ? out.metaCsps[0] : null;
   out.generator = html.match(/<meta[^>]+name\s*=\s*["']generator["'][^>]*>/i)?.[0] || null;
   out.canonical = html.match(/<link[^>]+rel\s*=\s*["']canonical["'][^>]*href\s*=\s*["']([^"']*)["']/i)?.[1]
     || html.match(/<link[^>]+href\s*=\s*["']([^"']*)["'][^>]*rel\s*=\s*["']canonical["']/i)?.[1] || null;
@@ -189,8 +195,87 @@ function checkDisclosureText(s, label, { html = false } = {}) {
   return sec.length + hosts.length + vocab.length;
 }
 
+// ── CSP evaluation, per the spec rather than by feel ──
+// Fallback chains. frame-ancestors never falls back.
+const FALLBACK = {
+  'script-src-elem': ['script-src-elem', 'script-src', 'default-src'],
+  'script-src-attr': ['script-src-attr', 'script-src', 'default-src'],
+  'script-src': ['script-src', 'default-src'],
+  'style-src-elem': ['style-src-elem', 'style-src', 'default-src'],
+  'style-src-attr': ['style-src-attr', 'style-src', 'default-src'],
+  'style-src': ['style-src', 'default-src'],
+};
+function effective(policy, directive) {
+  for (const d of FALLBACK[directive] || [directive]) if (policy[d]) return policy[d];
+  return null; // this policy does not govern the directive at all
+}
+const hashesIn = (tokens) => {
+  const out = new Map(); // algo -> Set<base64>
+  for (const t of tokens) { const m = /^'(sha(?:256|384|512))-([A-Za-z0-9+/=]+)'$/.exec(t); if (m) (out.get(m[1]) ?? out.set(m[1], new Set()).get(m[1])).add(m[2]); }
+  return out;
+};
+const digest = (algo, text) => createHash(algo).update(text, 'utf8').digest('base64');
+// Does ONE policy allow this inline element (script or <style>)? null tokens = not governed = allowed.
+function allowsInline(tokens, body, nonceAttr) {
+  if (!tokens) return true;
+  const hashes = hashesIn(tokens), nonces = tokens.filter((t) => /^'nonce-/.test(t));
+  if (!hashes.size && !nonces.length) return tokens.includes("'unsafe-inline'");
+  // CSP2+: with hashes or nonces present, 'unsafe-inline' is ignored.
+  if (nonceAttr && nonces.includes(`'nonce-${nonceAttr}'`)) return true;
+  for (const [algo, set] of hashes) if (set.has(digest(algo, body))) return true;
+  return false;
+}
+// Inline event handlers and style="" attributes: 'unsafe-inline' (when not neutralised) or 'unsafe-hashes' + hash.
+function allowsInlineAttr(tokens) {
+  if (!tokens) return true;
+  const hasHashOrNonce = hashesIn(tokens).size || tokens.some((t) => /^'nonce-/.test(t));
+  if (!hasHashOrNonce) return tokens.includes("'unsafe-inline'");
+  return tokens.includes("'unsafe-hashes'"); // hashes for attributes exist but we cannot verify them statically; assume the author did it
+}
+// Evaluate a document against ALL policies on the response (header(s) + <meta>): content must pass every one.
+function evaluateDoc(doc, policies) {
+  const r = { scriptsGoverned: false, stylesGoverned: false, blockedScripts: [], blockedStyleTags: 0, styleAttrsBlocked: false, handlersBlocked: false, nonceUsed: false };
+  for (const p of policies) {
+    if (effective(p, 'script-src-elem')) r.scriptsGoverned = true;
+    if (effective(p, 'style-src-elem') || effective(p, 'style-src-attr')) r.stylesGoverned = true;
+  }
+  for (const sc of doc.inlineScripts) {
+    if (sc.nonce) r.nonceUsed = true;
+    if (policies.some((p) => !allowsInline(effective(p, 'script-src-elem'), sc.body, sc.nonce))) r.blockedScripts.push(sc);
+  }
+  for (const st of doc.styleTagBodies) if (policies.some((p) => !allowsInline(effective(p, 'style-src-elem'), st.body, st.nonce))) r.blockedStyleTags++;
+  if (doc.styleAttrs) r.styleAttrsBlocked = policies.some((p) => !allowsInlineAttr(effective(p, 'style-src-attr')));
+  if (doc.eventHandlers) r.handlersBlocked = policies.some((p) => !allowsInlineAttr(effective(p, 'script-src-attr')));
+  return r;
+}
+const EDGE_RE = /__CF\$cv\$params|\/cdn-cgi\/challenge-platform\/|cloudflareinsights|rocket-loader|__cfRLUnblockHandlers/i;
+// Report the evaluation under the current section.
+function reportInline(doc, policies, label) {
+  const ev = evaluateDoc(doc, policies);
+  const n = doc.inlineScripts.length;
+  if (!policies.length) info('inline-js', `${n} inline script(s), no CSP to judge them against`);
+  else if (!ev.scriptsGoverned) fail('csp-script', `no policy on ${label} restricts scripts (no script-src, no default-src) — scripts are unrestricted`);
+  else if (n === 0) pass('inline-js', 'no executable inline <script>');
+  else if (!ev.blockedScripts.length) pass('inline-js', `${n} inline script(s), all allowed by every policy${ev.nonceUsed ? ' (nonce)' : ''}`);
+  else {
+    const edge = ev.blockedScripts.filter((sc) => EDGE_RE.test(sc.body)).length, own = ev.blockedScripts.length - edge;
+    if (own) fail('inline-js', `${own} of ${n} inline script(s) are blocked by the CSP — no matching hash/nonce in some policy (stale hash? trailing newline changes it)`);
+    if (edge) (opt.acceptEdge ? info : warn)('inline-js-edge', `${edge} inline script(s) injected at the edge by Cloudflare (JS detections / analytics / Rocket Loader) — blocked by the CSP, so it never runs; it carries a per-request token and cannot be hashed. Turn the feature off, or accept it${opt.acceptEdge ? ' (accepted)' : ' (--accept-edge-inline)'}.`);
+  }
+  if (doc.styleAttrs || doc.styleTags) {
+    if (!policies.length || !ev.stylesGoverned) info('inline-css', `${doc.styleAttrs} style="" attribute(s), ${doc.styleTags} <style> tag(s), styles not governed by a CSP`);
+    else if (ev.styleAttrsBlocked || ev.blockedStyleTags) fail('inline-css', `${ev.styleAttrsBlocked ? doc.styleAttrs + ' style="" attribute(s)' : ''}${ev.styleAttrsBlocked && ev.blockedStyleTags ? ' and ' : ''}${ev.blockedStyleTags ? ev.blockedStyleTags + ' <style> tag(s)' : ''} blocked by style-src — rendering without them`);
+    else info('inline-css', `${doc.styleAttrs} style="" attribute(s), ${doc.styleTags} <style> tag(s), allowed by the policy`);
+  } else pass('inline-css', 'no style="" attributes and no <style> tags');
+  if (doc.eventHandlers) {
+    if (ev.handlersBlocked) fail('inline-handlers', `${doc.eventHandlers} inline event handler attribute(s) (onclick=, onload= …) blocked by the CSP (hashes do not cover attributes without 'unsafe-hashes'); move them to addEventListener`);
+    else warn('inline-handlers', `${doc.eventHandlers} inline event handler attribute(s) (onclick=, onload= …) — allowed, but an XSS sink; move them to addEventListener`);
+  }
+  return ev;
+}
+
 // Shared: evaluate one set of response headers for a document.
-function checkDocHeaders(h, label) {
+function checkDocHeaders(h, label, { hasMeta = false } = {}) {
   section(`Headers — ${label}`);
   // HSTS
   const hsts = h['strict-transport-security'];
@@ -205,13 +290,14 @@ function checkDocHeaders(h, label) {
   // CSP
   const csp = h['content-security-policy'];
   const cspRo = h['content-security-policy-report-only'];
-  let d = null;
+  let d = null; const headerPolicies = [];
   if (!csp) { if (cspRo) warn('csp', 'Only a Report-Only CSP; nothing is enforced'); else fail('csp', 'Content-Security-Policy header missing'); }
   else {
     const multi = Array.isArray(csp) ? csp : csp.split(/,(?=\s*[a-z-]+-src|\s*default-src|\s*frame-ancestors|\s*base-uri|\s*object-src)/i);
     if (multi.length > 1) fail('csp-multi', `${multi.length} CSP policies on one response — browsers enforce ALL of them (the intersection). Usually a /* rule plus a path rule in _headers.`, multi.join('\n'));
-    d = parseCsp(multi[0]);
-    checkCspDirectives(d, 'header');
+    for (const m of multi) headerPolicies.push(parseCsp(m));
+    d = headerPolicies[0];
+    checkCspDirectives(d, 'header', { hasMeta });
   }
   // frame protection
   const xfo = h['x-frame-options'];
@@ -229,12 +315,12 @@ function checkDocHeaders(h, label) {
   if (h['cross-origin-resource-policy']) pass('corp', `Cross-Origin-Resource-Policy: ${h['cross-origin-resource-policy']}`); else info('corp', 'Cross-Origin-Resource-Policy not set');
   checkAcao(h, 'document');
   checkDisclosure(h);
-  return d;
+  return { d, headerPolicies };
 }
 
-function checkCspDirectives(d, where) {
-  const script = d['script-src'] ?? d['default-src'];
-  if (!script) fail('csp-script', `${where} CSP has neither script-src nor default-src — scripts are unrestricted`);
+function checkCspDirectives(d, where, { hasMeta = false } = {}) {
+  const script = effective(d, 'script-src-elem');
+  if (!script) { if (hasMeta) info('csp-script', `${where} CSP does not restrict scripts; the page's <meta> CSP is evaluated below`); else fail('csp-script', `${where} CSP has neither script-src nor default-src — scripts are unrestricted`); }
   else {
     if (script.includes("'unsafe-inline'") && !script.some((s) => /^'(nonce|sha(256|384|512))-/.test(s))) fail('csp-script', `script-src allows 'unsafe-inline' — the CSP does not stop XSS`, script.join(' '));
     else if (script.includes("'unsafe-eval'")) warn('csp-script', `script-src allows 'unsafe-eval'`, script.join(' '));
@@ -246,15 +332,16 @@ function checkCspDirectives(d, where) {
     const cdn = script.filter((s) => /(jsdelivr|unpkg|cdnjs|googleapis|gstatic|cloudflare\.com|jquery)/i.test(s));
     if (cdn.length) warn('csp-cdn', `script-src trusts a public CDN (${cdn.join(' ')}) — anything on that host is allowed to run. Self-host it, or pin with Subresource Integrity.`);
   }
-  const style = d['style-src'] ?? d['default-src'];
-  if (!style) warn('csp-style', `no style-src / default-src`);
-  else if (style.includes("'unsafe-inline'")) info('csp-style', `style-src allows 'unsafe-inline' (CSS injection; mostly defacement — acceptable, but avoidable with zero inline styles)`);
+  const style = effective(d, 'style-src-elem');
+  if (!style) { if (!hasMeta) warn('csp-style', `no style-src / default-src`); }
+  else if (style.includes("'unsafe-inline'") && !hashesIn(style).size && !style.some((t) => /^'nonce-/.test(t))) info('csp-style', `style-src allows 'unsafe-inline' (CSS injection; mostly defacement — acceptable, but avoidable with zero inline styles)`);
+  else if (style.includes("'unsafe-inline'")) info('csp-style', `style-src lists 'unsafe-inline' next to hashes/nonces — browsers ignore it then; style="" attributes need 'unsafe-hashes'`);
   else pass('csp-style', `style-src ${style.join(' ')}`);
   const obj = d['object-src'] ?? d['default-src'];
-  if (!obj || !obj.includes("'none'")) warn('csp-object', `object-src is not 'none' (plugins / legacy <object> allowed)`); else pass('csp-object', `object-src 'none'`);
-  if (!d['base-uri']) warn('csp-base', `base-uri missing — an injected <base> can hijack every relative URL`); else pass('csp-base', `base-uri ${d['base-uri'].join(' ')}`);
-  if (!d['form-action']) info('csp-form', `form-action not set (fine only if the site has no forms AND you accept injected forms posting anywhere)`); else pass('csp-form', `form-action ${d['form-action'].join(' ')}`);
-  if (!d['default-src']) warn('csp-default', `default-src missing — every fetch directive you did not name is wide open`);
+  if (obj?.includes("'none'")) pass('csp-object', `object-src 'none'`); else if (!hasMeta) warn('csp-object', `object-src is not 'none' (plugins / legacy <object> allowed)`);
+  if (d['base-uri']) pass('csp-base', `base-uri ${d['base-uri'].join(' ')}`); else if (!hasMeta) warn('csp-base', `base-uri missing — an injected <base> can hijack every relative URL`);
+  if (d['form-action']) pass('csp-form', `form-action ${d['form-action'].join(' ')}`); else if (!hasMeta) info('csp-form', `form-action not set (fine only if the site has no forms AND you accept injected forms posting anywhere)`);
+  if (!d['default-src']) { if (!hasMeta) warn('csp-default', `default-src missing — every fetch directive you did not name is wide open`); }
   else if (!d['default-src'].includes("'none'") && !d['default-src'].includes("'self'")) warn('csp-default', `default-src ${d['default-src'].join(' ')}`);
   if (where === 'meta' && d['frame-ancestors']) warn('csp-meta-fa', `frame-ancestors inside a <meta> CSP is IGNORED by browsers — it must be a real header`);
   if (where === 'meta' && d['report-uri']) warn('csp-meta-ru', `report-uri inside a <meta> CSP is ignored`);
@@ -274,57 +361,22 @@ function checkDisclosure(h) {
   for (const k of ['x-powered-by', 'x-generator', 'x-aspnet-version', 'x-aspnetmvc-version', 'x-drupal-cache', 'x-wix-request-id']) if (h[k]) warn('powered', `${k}: ${h[k]} — stack disclosure`);
 }
 
-// Compare a document's inline code against its effective CSP (header + meta).
-function checkInlineVsCsp(doc, d, label) {
+// Compare a document's inline code against every policy on the response (header(s) + <meta>).
+function checkInlineVsCsp(doc, headerPolicies, label) {
   section(`Inline code — ${label}`);
-  if (doc.metaCsp !== null) {
-    const md = parseCsp(doc.metaCsp);
-    info('meta-csp', `page carries a <meta> CSP too`);
+  const policies = [...(headerPolicies || [])];
+  for (const [i, mc] of doc.metaCsps.entries()) {
+    const md = parseCsp(mc);
+    info('meta-csp', `page carries a <meta> CSP${doc.metaCsps.length > 1 ? ` (${i + 1}/${doc.metaCsps.length})` : ''}${headerPolicies?.length ? ' — enforced together with the header, as an intersection' : ''}`);
     checkCspDirectives(md, 'meta');
-    if (!d) d = md; else {
-      // both enforced: merge by taking meta for script/style when header lacks them
-      for (const k of Object.keys(md)) if (!(k in d)) d[k] = md[k];
-    }
+    policies.push(md);
   }
-  const n = doc.inlineScripts.length;
-  if (n === 0) pass('inline-js', 'no executable inline <script>');
-  else {
-    const script = d ? (d['script-src'] ?? d['default-src'] ?? []) : null;
-    if (!script) info('inline-js', `${n} inline script(s), no CSP to judge them against`);
-    else if (script.includes("'unsafe-inline'") && !script.some((s) => /^'(nonce|sha)/.test(s))) warn('inline-js', `${n} inline script(s), allowed by 'unsafe-inline'`);
-    else {
-      const hashes = new Set(script.filter((s) => /^'sha(256|384|512)-/.test(s)));
-      const nonces = script.some((s) => s.startsWith("'nonce-"));
-      let missing = 0;
-      for (const body of doc.inlineScripts) {
-        const ok = ['sha256', 'sha384', 'sha512'].some((a) => hashes.has(sha(a, body)));
-        if (!ok) missing++;
-      }
-      if (nonces) info('inline-js', `${n} inline script(s) under a nonce policy (nonces cannot be verified statically)`);
-      else if (missing === 0) pass('inline-js', `${n} inline script(s), every hash is in the policy`);
-      else {
-        const injected = doc.inlineScripts.filter((b) => /cdn-cgi|__cf|cloudflare/i.test(b)).length;
-        if (injected && opt.acceptEdge && injected === missing) info('inline-js', `${injected} inline script(s) injected at the edge by Cloudflare — blocked by the CSP, accepted (--accept-edge-inline)`);
-        else if (injected) fail('inline-js', `${missing} of ${n} inline script(s) have no matching hash in script-src — ${injected} look(s) injected at the edge by Cloudflare (Bot Fight Mode "JavaScript Detections", Web Analytics auto-inject, Email Obfuscation): it is NOT in your build and the browser blocks it. Turn the feature off, or allow it on purpose (Cloudflare can add a nonce when the CSP carries one).`);
-        else fail('inline-js', `${missing} of ${n} inline script(s) have no matching hash in script-src — the browser BLOCKS them (or the hash is stale)`);
-      }
-    }
-  }
-  if (doc.styleAttrs || doc.styleTags) {
-    const style = d ? (d['style-src'] ?? d['default-src'] ?? []) : null;
-    if (style && !style.includes("'unsafe-inline'") && !style.some((s) => /^'(nonce|sha)/.test(s))) fail('inline-css', `${doc.styleAttrs} style="" attribute(s) and ${doc.styleTags} <style> tag(s) but style-src forbids inline styles — the page is rendering without them`);
-    else info('inline-css', `${doc.styleAttrs} style="" attribute(s), ${doc.styleTags} <style> tag(s)`);
-  } else pass('inline-css', 'no style="" attributes and no <style> tags');
-  if (doc.eventHandlers) {
-    const script = d ? (d['script-src'] ?? d['default-src'] ?? []) : null;
-    if (script && !script.includes("'unsafe-inline'") && !script.includes("'unsafe-hashes'")) fail('inline-handlers', `${doc.eventHandlers} inline event handler attribute(s) (onclick=, onload= …) — blocked by the CSP (hashes do not cover them without 'unsafe-hashes'); move them to addEventListener in a bundled module`);
-    else warn('inline-handlers', `${doc.eventHandlers} inline event handler attribute(s) (onclick=, onload= …) — an XSS sink; move them to addEventListener`);
-  }
+  const ev = reportInline(doc, policies, label);
+  const stylePolicy = policies.map((p) => effective(p, 'style-src-elem')).find(Boolean);
   if (doc.svgInline) {
     if (doc.svgScripts) fail('svg-script', `<script> inside ${doc.svgScripts} inline <svg> — executable, and from content it is an XSS vector`);
     if (doc.svgStyles) {
-      const style = d ? (d['style-src'] ?? d['default-src'] ?? []) : null;
-      if (style && !style.includes("'unsafe-inline'")) fail('svg-style', `<style> inside inline <svg> (${doc.svgStyles}) but style-src forbids inline styles — the SVG renders unstyled; move the rules to the stylesheet`);
+      if (ev.blockedStyleTags) fail('svg-style', `<style> inside inline <svg> (${doc.svgStyles}) but style-src forbids inline styles — the SVG renders unstyled; move the rules to the stylesheet`);
       else info('svg-style', `<style> inside inline <svg> (${doc.svgStyles})`);
     }
     const ext = doc.svgRefs.filter((r) => /^https?:\/\//i.test(r));
@@ -403,13 +455,13 @@ async function liveScan(input) {
   else info('alias', `https://${other}/ answers ${o.status}`);
   }
 
-  const d = checkDocHeaders(doc.headers, 'document');
+  const html = inspectHtml(doc.text);
+  const { headerPolicies } = checkDocHeaders(doc.headers, 'document', { hasMeta: html.metaCsps.length > 0 });
   const cc = doc.headers['cache-control'] || '';
   section('Caching');
   if (/no-store/i.test(cc)) info('cache-doc', `document is no-store (${cc})`); else info('cache-doc', `document Cache-Control: ${cc || '(none)'}`);
 
-  const html = inspectHtml(doc.text);
-  checkInlineVsCsp(html, d, 'document');
+  checkInlineVsCsp(html, headerPolicies, 'document');
   section('Document');
   if (html.canonical) {
     try { const c = new URL(html.canonical, finalUrl); if (c.host !== finalUrl.host) warn('canonical', `canonical points at another host: ${html.canonical}`); else if (!/^https?:\/\//i.test(html.canonical)) warn('canonical', `canonical is relative (${html.canonical}) — make it absolute so mirrors/previews cannot compete`); else pass('canonical', `canonical ${html.canonical}`); } catch { warn('canonical', `canonical is not a URL: ${html.canonical}`); }
@@ -542,18 +594,18 @@ async function liveScan(input) {
       const r = await get(l);
       if (r.status !== 200) { warn('page', `${l} → ${r.status}`); continue; }
       const h = r.headers; const csp = h['content-security-policy'];
-      if (!csp) fail('page-csp', `${new URL(l).pathname} has NO CSP header (route missing from the headers path list?)`);
-      else policies.set(csp, (policies.get(csp) || []).concat(new URL(l).pathname));
+      if (!csp && !/http-equiv\s*=\s*["']content-security-policy/i.test(r.text)) fail('page-csp', `${new URL(l).pathname} has NO CSP (neither header nor <meta>; route missing from the headers path list?)`);
+      else if (csp) policies.set(csp, (policies.get(csp) || []).concat(new URL(l).pathname));
       if (!h['strict-transport-security']) fail('page-hsts', `${new URL(l).pathname} has no HSTS`);
       const ih = inspectHtml(r.text);
-      const pd = csp ? parseCsp(csp) : null;
-      const script = pd ? (pd['script-src'] ?? pd['default-src'] ?? []) : null;
-      if (script && ih.inlineScripts.length && !script.includes("'unsafe-inline'")) {
-        const hashes = new Set(script.filter((s) => /^'sha/.test(s)));
-        const miss = ih.inlineScripts.filter((b) => !['sha256', 'sha384', 'sha512'].some((a) => hashes.has(sha(a, b)))).length;
-        const edgeOnly = ih.inlineScripts.every((b) => /cdn-cgi|__cf|cloudflare/i.test(b));
-        if (miss && opt.acceptEdge && edgeOnly) { /* accepted edge injection */ }
-        else if (miss && !script.some((s) => s.startsWith("'nonce-"))) fail('page-inline', `${new URL(l).pathname}: ${miss} inline script(s) not allowed by its CSP${ih.inlineScripts.some((b) => /cdn-cgi|__cf|cloudflare/i.test(b)) ? ' (edge-injected by Cloudflare)' : ''}`);
+      const pols = [...(csp ? csp.split(/,(?=\s*[a-z-]+-src|\s*default-src|\s*frame-ancestors)/i).map(parseCsp) : []), ...ih.metaCsps.map(parseCsp)];
+      if (!csp && !ih.metaCsps.length) { /* already reported above */ }
+      else {
+        const pev = evaluateDoc(ih, pols);
+        const own = pev.blockedScripts.filter((sc) => !EDGE_RE.test(sc.body)).length;
+        if (!pev.scriptsGoverned) fail('page-csp', `${new URL(l).pathname}: no policy restricts scripts`);
+        if (own) fail('page-inline', `${new URL(l).pathname}: ${own} inline script(s) blocked by its CSP`);
+        if (pev.styleAttrsBlocked || pev.blockedStyleTags) fail('page-inline-css', `${new URL(l).pathname}: inline styles blocked by style-src`);
       }
       if (ih.jsonldErrors.length) fail('page-jsonld', `${new URL(l).pathname}: JSON-LD does not parse`);
     }
@@ -708,32 +760,35 @@ function distScan(dir) {
   for (const [, grp] of seen) {
     g++;
     const label = `${grp.pages.length} page(s) e.g. ${grp.pages[0]}`;
-    const d = checkDocHeaders(grp.h, label);
-    // inline code across the group
-    const totals = { inline: 0, missing: 0, styleAttrs: 0, styleTags: 0, jsonldErr: 0, gen: 0, pages: new Set() };
+    const anyMeta = grp.docs.some((doc) => doc.metaCsps.length);
+    const { headerPolicies } = checkDocHeaders(grp.h, label, { hasMeta: anyMeta });
+    // inline code across the group: every page evaluated against header policies + its own <meta> policies (intersection)
+    const totals = { inline: 0, own: 0, edge: 0, styleAttrs: 0, styleTags: 0, cssBlockedPages: 0, jsonldErr: 0, gen: 0, pages: new Set(), ungoverned: 0, metaSeen: new Set() };
     for (const [i, doc] of grp.docs.entries()) {
-      let eff = d;
-      if (doc.metaCsp !== null) { const md = parseCsp(doc.metaCsp); eff = { ...md, ...(d || {}) }; for (const k of Object.keys(md)) if (!(eff[k])) eff[k] = md[k]; }
-      const script = eff ? (eff['script-src'] ?? eff['default-src'] ?? []) : [];
-      const hashes = new Set(script.filter((s) => /^'sha/.test(s)));
-      const unsafe = script.includes("'unsafe-inline'") && !script.some((s) => /^'(nonce|sha)/.test(s));
-      for (const b of doc.inlineScripts) { totals.inline++; if (!unsafe && !['sha256', 'sha384', 'sha512'].some((a) => hashes.has(sha(a, b)))) { totals.missing++; totals.pages.add(grp.pages[i]); } }
-      totals.styleAttrs += doc.styleAttrs; totals.styleTags += doc.styleTags; totals.jsonldErr += doc.jsonldErrors.length; if (doc.generator) totals.gen++;
+      const pols = [...headerPolicies, ...doc.metaCsps.map(parseCsp)];
+      for (const mc of doc.metaCsps) totals.metaSeen.add(mc.replace(/'sha(256|384|512)-[A-Za-z0-9+/=]+'/g, "'sha…'"));
+      const ev = evaluateDoc(doc, pols);
+      if (pols.length && !ev.scriptsGoverned) totals.ungoverned++;
+      totals.inline += doc.inlineScripts.length;
+      for (const sc of ev.blockedScripts) { if (EDGE_RE.test(sc.body)) totals.edge++; else { totals.own++; totals.pages.add(grp.pages[i]); } }
+      totals.styleAttrs += doc.styleAttrs; totals.styleTags += doc.styleTags; if (ev.styleAttrsBlocked || ev.blockedStyleTags) totals.cssBlockedPages++;
+      totals.jsonldErr += doc.jsonldErrors.length; if (doc.generator) totals.gen++;
     }
     section(`Inline code — ${label}`);
+    if (totals.metaSeen.size) { info('meta-csp', `${totals.metaSeen.size} distinct <meta> CSP shape(s) across these pages (hashes elided)`); for (const mc of [...totals.metaSeen].slice(0, 1)) checkCspDirectives(parseCsp(mc), 'meta'); }
+    if (totals.ungoverned) fail('csp-script', `${totals.ungoverned} page(s) where no policy restricts scripts`);
     if (!totals.inline) pass('inline-js', 'no executable inline <script> in this group');
-    else if (totals.missing) fail('inline-js', `${totals.missing} of ${totals.inline} inline script(s) are not allowed by the CSP (blocked, or stale hash) — e.g. ${[...totals.pages].slice(0, 3).join(', ')}`);
-    else pass('inline-js', `${totals.inline} inline script(s), all allowed by the policy`);
-    const style = d ? (d['style-src'] ?? d['default-src'] ?? []) : [];
-    if ((totals.styleAttrs || totals.styleTags) && d && !style.includes("'unsafe-inline'") && !style.some((s) => /^'(nonce|sha)/.test(s))) fail('inline-css', `${totals.styleAttrs} style="" attribute(s) / ${totals.styleTags} <style> tag(s) but style-src forbids inline styles`);
-    else if (totals.styleAttrs || totals.styleTags) info('inline-css', `${totals.styleAttrs} style="" attribute(s), ${totals.styleTags} <style> tag(s)`);
+    else if (totals.own) fail('inline-js', `${totals.own} of ${totals.inline} inline script(s) are blocked by the CSP (no matching hash/nonce in some policy; stale hash?) — e.g. ${[...totals.pages].slice(0, 3).join(', ')}`);
+    else pass('inline-js', `${totals.inline} inline script(s), all allowed by every policy`);
+    if (totals.cssBlockedPages) fail('inline-css', `inline styles blocked by style-src on ${totals.cssBlockedPages} page(s) (${totals.styleAttrs} style="" attribute(s), ${totals.styleTags} <style> tag(s) in the group)`);
+    else if (totals.styleAttrs || totals.styleTags) info('inline-css', `${totals.styleAttrs} style="" attribute(s), ${totals.styleTags} <style> tag(s), allowed by the policy`);
     else pass('inline-css', 'no inline styles');
     if (totals.jsonldErr) fail('jsonld', `${totals.jsonldErr} JSON-LD block(s) do not parse`); else pass('jsonld', 'JSON-LD parses');
     const handlers = grp.docs.reduce((n, doc) => n + doc.eventHandlers, 0);
-    if (handlers) fail('inline-handlers', `${handlers} inline event handler attribute(s) (onclick=, onload= …) across the group — blocked by a hash/'self' CSP, and an XSS sink`);
+    if (handlers) { const blocked = grp.docs.some((doc) => doc.eventHandlers && evaluateDoc(doc, [...headerPolicies, ...doc.metaCsps.map(parseCsp)]).handlersBlocked); (blocked ? fail : warn)('inline-handlers', `${handlers} inline event handler attribute(s) (onclick=, onload= …) across the group — ${blocked ? 'blocked by the CSP' : 'allowed, but an XSS sink'}; move them to addEventListener`); }
     const svgS = grp.docs.reduce((n, doc) => n + doc.svgScripts, 0), svgC = grp.docs.reduce((n, doc) => n + doc.svgStyles, 0);
     if (svgS) fail('svg-script', `<script> inside inline <svg> on ${svgS} occurrence(s)`);
-    if (svgC && d && !style.includes("'unsafe-inline'")) fail('svg-style', `<style> inside inline <svg> (${svgC}) but style-src forbids inline styles`);
+    if (svgC && totals.cssBlockedPages) fail('svg-style', `<style> inside inline <svg> (${svgC}) on pages whose style-src blocks inline styles`);
     const svgExt = [...new Set(grp.docs.flatMap((doc) => doc.svgRefs).filter((r) => /^https?:\/\//i.test(r)))];
     if (svgExt.length) warn('svg-ext', `inline <svg> references external resources: ${svgExt.slice(0, 3).join(', ')}`);
     const merged = { external: grp.docs.flatMap((doc) => doc.external) };

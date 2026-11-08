@@ -111,6 +111,8 @@ or clone and run `node bin/kekkai.mjs <target>`.
 --no-probe          live: skip the leak-path probes
 --pages N           live: sample N inner pages from the sitemap (default 5)
 --no-history        repo: skip the git-history scan
+--accept-edge-inline  live: a CDN-injected inline script (Cloudflare JS detections) is info, not failure
+--repo | --dist     force the mode for a folder
 --admin <folder>    dist: the CMS/admin folder name
 --forbid a,b,c      strings that must not appear in the output
 ```

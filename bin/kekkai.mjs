@@ -14,6 +14,7 @@
 //   --forbid a,b,c      strings that must not appear anywhere in the output (codenames, staging hosts…)
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
+//   --accept-edge-inline  live: an inline script injected by the CDN (Cloudflare JS detections) is reported as info, not failure
 //   --repo | --dist     force the mode for a folder (default: .git without index.html/_headers → repo, otherwise dist)
 //
 // Only scan sites you own or are allowed to test.
@@ -25,7 +26,7 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '' };
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false };
 let target = '';
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -33,6 +34,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--strict') opt.strict = true;
   else if (a === '--no-probe') opt.probe = false;
   else if (a === '--no-history') opt.history = false;
+  else if (a === '--accept-edge-inline') opt.acceptEdge = true;
   else if (a === '--repo') opt.mode = 'repo';
   else if (a === '--dist') opt.mode = 'dist';
   else if (a === '--admin') opt.admin = argv[++i] || '';
@@ -50,7 +52,7 @@ function usage() {
   kekkai ./dist                       scan a build folder (+ _headers)
   kekkai ./repo                       scan a git working copy (auto-detected by .git)
 
-  --json  --strict  --no-probe  --no-history  --repo | --dist  --admin <folder>  --forbid a,b,c  --pages N`);
+  --json  --strict  --no-probe  --no-history  --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -302,7 +304,8 @@ function checkInlineVsCsp(doc, d, label) {
       else if (missing === 0) pass('inline-js', `${n} inline script(s), every hash is in the policy`);
       else {
         const injected = doc.inlineScripts.filter((b) => /cdn-cgi|__cf|cloudflare/i.test(b)).length;
-        if (injected) fail('inline-js', `${missing} of ${n} inline script(s) have no matching hash in script-src — ${injected} look(s) injected at the edge by Cloudflare (Bot Fight Mode "JavaScript Detections", Web Analytics auto-inject, Email Obfuscation): it is NOT in your build and the browser blocks it. Turn the feature off, or allow it on purpose (Cloudflare can add a nonce when the CSP carries one).`);
+        if (injected && opt.acceptEdge && injected === missing) info('inline-js', `${injected} inline script(s) injected at the edge by Cloudflare — blocked by the CSP, accepted (--accept-edge-inline)`);
+        else if (injected) fail('inline-js', `${missing} of ${n} inline script(s) have no matching hash in script-src — ${injected} look(s) injected at the edge by Cloudflare (Bot Fight Mode "JavaScript Detections", Web Analytics auto-inject, Email Obfuscation): it is NOT in your build and the browser blocks it. Turn the feature off, or allow it on purpose (Cloudflare can add a nonce when the CSP carries one).`);
         else fail('inline-js', `${missing} of ${n} inline script(s) have no matching hash in script-src — the browser BLOCKS them (or the hash is stale)`);
       }
     }
@@ -548,7 +551,9 @@ async function liveScan(input) {
       if (script && ih.inlineScripts.length && !script.includes("'unsafe-inline'")) {
         const hashes = new Set(script.filter((s) => /^'sha/.test(s)));
         const miss = ih.inlineScripts.filter((b) => !['sha256', 'sha384', 'sha512'].some((a) => hashes.has(sha(a, b)))).length;
-        if (miss && !script.some((s) => s.startsWith("'nonce-"))) fail('page-inline', `${new URL(l).pathname}: ${miss} inline script(s) not allowed by its CSP${ih.inlineScripts.some((b) => /cdn-cgi|__cf|cloudflare/i.test(b)) ? ' (edge-injected by Cloudflare)' : ''}`);
+        const edgeOnly = ih.inlineScripts.every((b) => /cdn-cgi|__cf|cloudflare/i.test(b));
+        if (miss && opt.acceptEdge && edgeOnly) { /* accepted edge injection */ }
+        else if (miss && !script.some((s) => s.startsWith("'nonce-"))) fail('page-inline', `${new URL(l).pathname}: ${miss} inline script(s) not allowed by its CSP${ih.inlineScripts.some((b) => /cdn-cgi|__cf|cloudflare/i.test(b)) ? ' (edge-injected by Cloudflare)' : ''}`);
       }
       if (ih.jsonldErrors.length) fail('page-jsonld', `${new URL(l).pathname}: JSON-LD does not parse`);
     }

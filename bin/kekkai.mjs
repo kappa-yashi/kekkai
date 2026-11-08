@@ -370,6 +370,10 @@ function checkCspDirectives(d, where, { hasMeta = false } = {}) {
     if (wild.length) warn('csp-script-wild', `script-src has wildcard hosts: ${wild.join(' ')}`);
     const cdn = script.filter((s) => /(jsdelivr|unpkg|cdnjs|googleapis|gstatic|cloudflare\.com|jquery)/i.test(s));
     if (cdn.length) warn('csp-cdn', `script-src trusts a public CDN (${cdn.join(' ')}) — anything on that host is allowed to run. Self-host it, or pin with Subresource Integrity.`);
+    const tagmgr = script.filter((s) => /(googletagmanager|google-analytics|gtm\.|segment\.(com|io)|hotjar|clarity\.ms|connect\.facebook|tiktok|snap\.licdn|cdn\.mxpnl|matomo|plausible|hs-scripts|intercom|crisp\.chat|tawk)/i.test(s));
+    if (tagmgr.length) warn('csp-tagmanager', `script-src trusts a tag manager / analytics host (${tagmgr.join(' ')}) — a tag manager is remote code execution for anyone with access to the container, and it loads whatever tags are added later. Prefer a first-party proxy or a server-side setup; at minimum, lock the container's publishing rights.`);
+    const thirdParty = script.filter((s) => /^https?:\/\//i.test(s) || /^[a-z0-9*.-]+\.[a-z]{2,}(:\d+)?$/i.test(s)).filter((s) => !cdn.includes(s) && !tagmgr.includes(s));
+    if (thirdParty.length) info('csp-third-party', `script-src also trusts: ${thirdParty.join(' ')} — each host can run code on every page`);
   }
   const style = effective(d, 'style-src-elem');
   if (!style) { if (!hasMeta) warn('csp-style', `no style-src / default-src`); }
@@ -513,7 +517,7 @@ async function liveScan(input) {
   // assets: css, js, font
   section('Assets');
   const assetUrls = [];
-  const css = doc.text.match(/<link[^>]+rel\s*=\s*["']stylesheet["'][^>]*href\s*=\s*["']([^"']+)["']/i)?.[1] || doc.text.match(/<link[^>]+href\s*=\s*["']([^"']+\.css[^"']*)["']/i)?.[1];
+  const css = html.external.find((e) => e.kind === 'stylesheet' && (() => { try { return new URL(e.url, finalUrl).origin === finalUrl.origin; } catch { return false; } })())?.url || html.external.find((e) => e.kind === 'stylesheet')?.url;
   const js = html.externalScripts.find((s) => { try { return new URL(s, finalUrl).origin === finalUrl.origin; } catch { return false; } });
   const font = doc.text.match(/<link[^>]+as\s*=\s*["']font["'][^>]*href\s*=\s*["']([^"']+)["']/i)?.[1] || doc.text.match(/href\s*=\s*["']([^"']+\.woff2?[^"']*)["']/i)?.[1];
   for (const [kind, href] of [['stylesheet', css], ['script', js], ['font', font]]) {
@@ -654,10 +658,17 @@ async function liveScan(input) {
     section('Inner pages');
     // sample by path on the scanned origin, so a local preview of a sitemap that names the real domain still works
     const sample = [...new Set(pageUrls.map((l) => { try { return origin + new URL(l).pathname; } catch { return null; } }).filter(Boolean))].filter((l) => l !== finalUrl.href && l !== `${origin}/`).slice(0, opt.pages);
-    const policies = new Map();
-    for (const l of sample) {
-      const r = await get(l);
+    const policies = new Map(); let scannedPages = 0;
+    for (let l of sample) {
+      let r = await get(l), hops = 0;
+      while (r.status >= 300 && r.status < 400 && r.headers.location && hops < 3) {
+        const next = new URL(r.headers.location, l);
+        if (next.origin !== origin) break;
+        info('page-redirect', `${new URL(l).pathname} → ${r.status} → ${next.pathname}${r.status === 307 || r.status === 302 ? ' (temporary; a canonical URL change wants a 301)' : ''}`);
+        l = next.href; r = await get(l); hops++;
+      }
       if (r.status !== 200) { warn('page', `${l} → ${r.status}`); continue; }
+      scannedPages++;
       const h = r.headers; const csp = h['content-security-policy'];
       if (!csp && !/http-equiv\s*=\s*["']content-security-policy/i.test(r.text)) fail('page-csp', `${new URL(l).pathname} has NO CSP (neither header nor <meta>; route missing from the headers path list?)`);
       else if (csp) policies.set(csp, (policies.get(csp) || []).concat(new URL(l).pathname));
@@ -675,7 +686,8 @@ async function liveScan(input) {
       if (ih.jsonldErrors.length) fail('page-jsonld', `${new URL(l).pathname}: JSON-LD does not parse`);
     }
     if (policies.size > 1) info('page-policies', `${policies.size} distinct CSPs across sampled pages (fine if intentional: docs vs text mirror vs admin)`);
-    if (sample.length && results.filter((r) => r.section === 'Inner pages' && r.level === 'fail').length === 0) pass('pages', `${sample.length} inner page(s): CSP + HSTS present, inline code consistent`);
+    if (!scannedPages) info('pages', `no inner page could be scanned (${sample.length} sampled)`);
+    else if (results.filter((r) => r.section === 'Inner pages' && r.level === 'fail').length === 0) pass('pages', `${scannedPages} inner page(s): CSP + HSTS present, inline code consistent`);
   }
 }
 

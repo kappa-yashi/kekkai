@@ -59,8 +59,9 @@ or clone and run `node bin/kekkai.mjs <target>`.
 - sitemap listing private-looking or foreign-host URLs
 - well-known leak paths (`.git/HEAD`, `.env`, `package.json`, config files,
   `wp-login.php`, `admin/` …) with soft-404 detection
-- a sample of inner pages: CSP + HSTS present on every route, inline code
-  consistent with each page's own policy
+- a sample of inner pages (same-origin redirects followed and reported): CSP +
+  HSTS present on every route, inline code consistent with each page's own
+  policy
 - **disclosure**: credential-shaped strings (known key prefixes, private key
   blocks, JWTs, secret assignments) in the document, its JS/CSS and the usual
   `/version` / `/changelog` routes; staging and preview hosts; vocabulary that

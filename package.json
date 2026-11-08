@@ -1,6 +1,6 @@
 {
   "name": "@kappa-yashi/kekkai",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "kekkai (結界) — static site boundary & disclosure check: headers, CSP, leaks. Zero dependencies.",
   "type": "module",
   "bin": { "kekkai": "bin/kekkai.mjs" },

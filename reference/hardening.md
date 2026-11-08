@@ -841,9 +841,23 @@ What gives it away, and what `kekkai` looks for:
   private repo, or in the agent's own project settings. If one must be
   tracked, it says how to build and test, not what the weak spots are.
 - **Commit trailers and PR footers:** `Co-Authored-By: <assistant> …`,
-  `🤖 Generated with …`, session links. Remove them from the commit template;
-  for an existing history, squash or rewrite (7.5) before the repo goes
-  public.
+  `🤖 Generated with …`, session links. A co-author trailer also puts the
+  assistant's account into the repository's **Contributors** list and graph,
+  which is the first thing a visitor sees. Remove the trailers from the commit
+  template; for an existing history, rewrite the messages (below) before the
+  repo goes public, and the contributor disappears with them.
+
+  ```bash
+  # drop the trailers from every commit message, keep trees and authorship
+  git filter-repo --force --message-callback '
+  import re
+  # (keep the pattern ASCII: a bytes literal cannot hold the robot emoji)
+  m = re.sub(rb"(?im)^(co-authored-by:.*(claude|copilot|chatgpt|gemini|cursor|codex|aider|devin).*|.*generated with \[claude code\].*|claude-session:.*)\n?", b"", message)
+  return m.rstrip(b"\n") + b"\n"
+  '
+  git push --force-with-lease origin main
+  git tag -f <tag> <new hash> && git push -f origin <tag>   # for each release tag
+  ```
 - **Attribution in output and docs:** a "built with <assistant>" line, a
   generator meta naming the tool, a `humans.txt` crediting it.
 - **Served agent files:** `/CLAUDE.md`, `/AGENTS.md`, `/.cursorrules` or

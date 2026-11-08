@@ -300,7 +300,11 @@ function checkInlineVsCsp(doc, d, label) {
       }
       if (nonces) info('inline-js', `${n} inline script(s) under a nonce policy (nonces cannot be verified statically)`);
       else if (missing === 0) pass('inline-js', `${n} inline script(s), every hash is in the policy`);
-      else fail('inline-js', `${missing} of ${n} inline script(s) have no matching hash in script-src — the browser BLOCKS them (or the hash is stale)`);
+      else {
+        const injected = doc.inlineScripts.filter((b) => /cdn-cgi|__cf|cloudflare/i.test(b)).length;
+        if (injected) fail('inline-js', `${missing} of ${n} inline script(s) have no matching hash in script-src — ${injected} look(s) injected at the edge by Cloudflare (Bot Fight Mode "JavaScript Detections", Web Analytics auto-inject, Email Obfuscation): it is NOT in your build and the browser blocks it. Turn the feature off, or allow it on purpose (Cloudflare can add a nonce when the CSP carries one).`);
+        else fail('inline-js', `${missing} of ${n} inline script(s) have no matching hash in script-src — the browser BLOCKS them (or the hash is stale)`);
+      }
     }
   }
   if (doc.styleAttrs || doc.styleTags) {
@@ -376,6 +380,7 @@ async function liveScan(input) {
   else pass('status', `${new URL(doc.url).href} 200 (${doc.body.length} bytes)`);
   const finalUrl = new URL(doc.url);
   const local = /^(localhost|127\.|0\.0\.0\.0|\[::1\]|192\.168\.|10\.)/.test(finalUrl.hostname) || finalUrl.hostname === '::1';
+  const host = finalUrl.hostname;
   if (local) info('local', 'local address — transport checks (http→https, apex↔www) skipped; run again against the live domain');
   // http -> https
   const httpUrl = `http://${finalUrl.host}/`;
@@ -386,7 +391,6 @@ async function liveScan(input) {
   else if (h1.status >= 300 && h1.status < 400 && /^https:/i.test(h1.headers.location || '')) warn('http', `http:// redirects to https with ${h1.status} — use a 301`);
   else fail('http', `http://${finalUrl.host}/ answers ${h1.status} instead of redirecting to https`);
   // apex <-> www
-  const host = finalUrl.hostname;
   const other = host.startsWith('www.') ? host.slice(4) : `www.${host}`;
   const o = await get(`https://${other}/`);
   if (o.status === 0) info('alias', `https://${other}/ not reachable (${o.error}) — only one hostname serves the site`);
@@ -477,7 +481,7 @@ async function liveScan(input) {
   if (robots.status === 200) {
     const lines = robots.text.split(/\r?\n/);
     const dis = lines.filter((l) => /^\s*disallow\s*:\s*\S/i.test(l));
-    const adminish = dis.filter((l) => /(admin|cms|login|wp-|backend|manage|dashboard|private|secret|internal|staging|dev)/i.test(l));
+    const adminish = dis.filter((l) => /(^|\/)(admin|administrator|cms|login|signin|wp-admin|wp-login\.php|backend|dashboard|private|internal|staging|_admin|manage)(\/|$)/i.test(l.replace(/^\s*disallow\s*:\s*/i, '')) || /(^|\/)(secret|dev|wp-[a-z]+)(\/|$)/i.test(l.replace(/^\s*disallow\s*:\s*/i, '')));
     if (adminish.length) fail('robots-admin', `robots.txt advertises a private path: ${adminish.map((l) => l.trim()).join(' | ')} — robots.txt is public; hide the path with an unguessable name + noindex header instead`);
     else if (dis.length) info('robots-disallow', `robots.txt disallows: ${dis.map((l) => l.trim()).join(' | ')} (every Disallow names a path to the world)`);
     else pass('robots', 'robots.txt names no private paths');
@@ -491,7 +495,7 @@ async function liveScan(input) {
     const s = await get(cand); if (s.status !== 200) continue;
     let locs = [...s.text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1]);
     if (/<sitemapindex/i.test(s.text)) { const first = locs[0] ? origin + new URL(locs[0]).pathname : ''; const sub = await get(first); locs = [...sub.text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1]); }
-    const bad = locs.filter((l) => /(admin|cms|login|wp-|backend|dashboard|private|internal|staging)/i.test(new URL(l).pathname));
+    const bad = locs.filter((l) => /(^|\/)(admin|administrator|cms|login|signin|wp-admin|wp-login\.php|backend|dashboard|private|internal|staging|_admin|manage)(\/|$)/i.test(new URL(l).pathname));
     if (bad.length) fail('sitemap-admin', `sitemap lists private-looking URLs: ${bad.slice(0, 5).join(', ')}`); else pass('sitemap', `sitemap ok (${locs.length} URLs from ${new URL(cand).pathname})`);
     const foreign = locs.filter((l) => { try { return new URL(l).host !== host; } catch { return true; } });
     if (foreign.length && !local) warn('sitemap-host', `${foreign.length} sitemap URL(s) on another host, e.g. ${foreign[0]}`);
@@ -544,7 +548,7 @@ async function liveScan(input) {
       if (script && ih.inlineScripts.length && !script.includes("'unsafe-inline'")) {
         const hashes = new Set(script.filter((s) => /^'sha/.test(s)));
         const miss = ih.inlineScripts.filter((b) => !['sha256', 'sha384', 'sha512'].some((a) => hashes.has(sha(a, b)))).length;
-        if (miss && !script.some((s) => s.startsWith("'nonce-"))) fail('page-inline', `${new URL(l).pathname}: ${miss} inline script(s) not allowed by its CSP`);
+        if (miss && !script.some((s) => s.startsWith("'nonce-"))) fail('page-inline', `${new URL(l).pathname}: ${miss} inline script(s) not allowed by its CSP${ih.inlineScripts.some((b) => /cdn-cgi|__cf|cloudflare/i.test(b)) ? ' (edge-injected by Cloudflare)' : ''}`);
       }
       if (ih.jsonldErrors.length) fail('page-jsonld', `${new URL(l).pathname}: JSON-LD does not parse`);
     }
@@ -753,7 +757,7 @@ function distScan(dir) {
       if (splatTo || /^(https?:)?\/\/\*/.test(to) || to === ':splat' || to === '*') { bad++; fail('redirect-open', `open redirect: "${from} → ${to}" — the destination host comes from the request`); continue; }
       if (/^https?:\/\//i.test(to) && /(staging|stage|dev\.|test\.|localhost|127\.0\.0\.1|\.pages\.dev|\.netlify\.app|\.workers\.dev|\.vercel\.app|ngrok)/i.test(to)) { bad++; warn('redirect-staging', `"${from} → ${to}" points at a staging / preview host`); continue; }
       if (code === '200' && /^https?:\/\//i.test(to)) { bad++; info('redirect-proxy', `"${from} → ${to} 200" proxies another origin (names the upstream; Pages ignores it, Netlify serves it)`); continue; }
-      if (/(admin|cms|login|wp-|backend|dashboard|private|internal)/i.test(from)) { bad++; info('redirect-admin', `"${from}" names a private-looking path in a public-ish file`); }
+      if (/(^|\/)(admin|administrator|cms|login|signin|wp-admin|wp-login\.php|backend|dashboard|private|internal|staging|_admin|manage)(\/|$)/i.test(from)) { bad++; info('redirect-admin', `"${from}" names a private-looking path in a public-ish file`); }
       if (!/^\//.test(from)) { bad++; warn('redirect-host', `"${from}" is not a path — _redirects cannot match hostnames on Pages; use a Redirect Rule`); }
     }
     if (!bad) pass('redirects', `_redirects: ${lines.length} rule(s), no open redirects, staging hosts or proxies`);
@@ -764,7 +768,7 @@ function distScan(dir) {
   const robots = files.find((f) => f.rel === '/robots.txt');
   if (robots) {
     const dis = read(robots).split(/\r?\n/).filter((l) => /^\s*disallow\s*:\s*\S/i.test(l));
-    const adminish = dis.filter((l) => /(admin|cms|login|wp-|backend|manage|dashboard|private|secret|internal|staging|dev)/i.test(l));
+    const adminish = dis.filter((l) => /(^|\/)(admin|administrator|cms|login|signin|wp-admin|wp-login\.php|backend|dashboard|private|internal|staging|_admin|manage)(\/|$)/i.test(l.replace(/^\s*disallow\s*:\s*/i, '')) || /(^|\/)(secret|dev|wp-[a-z]+)(\/|$)/i.test(l.replace(/^\s*disallow\s*:\s*/i, '')));
     if (adminish.length) fail('robots-admin', `robots.txt advertises a private path: ${adminish.map((l) => l.trim()).join(' | ')}`);
     else if (dis.length) info('robots-disallow', `robots.txt disallows: ${dis.map((l) => l.trim()).join(' | ')}`);
     else pass('robots', 'robots.txt names no private paths');

@@ -823,6 +823,7 @@ function repoScan(dir) {
   const comments = [];
   for (const f of textish.filter((f) => /\.(ts|tsx|js|mjs|cjs|astro|svelte|vue)$/i.test(f))) {
     let s; try { s = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    if (s.length / (s.split('\n').length || 1) > 300) continue; // minified / vendored bundle, not hand-written comments
     for (const m of s.matchAll(/(?:\/\/|\/\*|<!--|#)\s*([^\n]*)/g)) {
       const c = m[1];
       if (/\\b|\(\?:|\[\^/.test(c)) continue; // regex source, not prose

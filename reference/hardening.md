@@ -38,7 +38,8 @@ or zine that is pure added attack surface, and a zero is the correct result.
 5. Host dashboard audit (PART 4)
 6. Build-output leak audit + automated tests (PART 5)
 7. CMS surface, if there is one (PART 6)
-8. Verify every item against the live response, not against intent
+8. Repository and docs hygiene: what the repo itself discloses (PART 7)
+9. Verify every item against the live response, not against intent
 
 ---
 
@@ -504,7 +505,30 @@ stop publishing it: a label in the visible text, the address only in the
 `mailto:` href, and no dictionary-attack local parts (`info@`, `contact@`,
 `admin@`, `sales@`, `support@`, `hello@`).
 
-## 4.5 Account-wide toggles are not what you want
+## 4.5 Production builds come from `main`, and only from `main`
+
+Whatever goes online passes through a merge into `main` that a human does by
+hand. This is not a security hole in the strict sense; it is **control**: the
+merge forces you to look at what changes before it is public. If you cannot
+see what ships, one day something ships that should not have.
+
+- In the host's build settings the **production branch is `main`**; builds
+  for other branches are off (or produce previews only).
+- **Trap:** the production branch can be left pointing at a working branch
+  (an agent session's branch, say, whose name changes every session). Then
+  every push there goes live **with no PR and no review**, and when the next
+  session uses a new branch name, deploys silently stop.
+- **How it shows:** something is live that was never merged, or the
+  Deployments list names a branch other than `main`.
+- **Fix in this order:** (1) PR + merge the working branch into `main`, so
+  `main` has what is already live, otherwise the switch rolls the site back;
+  (2) change the production branch to `main`; (3) the setting change starts
+  no build, the next push to `main` does; (4) verify the newest deployment
+  says `main` and that a push to the working branch starts nothing.
+- After every merge, one glance at Deployments: branch `main`.
+- End-to-end tests run **before** the merge, because the merge is the deploy.
+
+## 4.6 Account-wide toggles are not what you want
 
 When a setting says "apply one account-wide policy across your Workers", two
 words should send you elsewhere: **account-wide** and **Workers**. For one
@@ -691,6 +715,132 @@ behind Access, and the repository is private.
 
 ---
 
+# PART 7: what the repository itself discloses
+
+The site output is one surface. The repository, its documentation and its
+history are another, and they are read by anyone with access to the repo,
+which for a public repo is everyone and for a private one is everyone who
+ever had a token. `kekkai ./repo` runs the mechanical half of this part.
+
+## 7.1 The principle
+
+**What looks innocent to you can be a door for someone else.** Not writing
+down keys is the obvious rule. The less obvious one is to write down as
+little as possible about **how** the security is set up: what a key is
+allowed to do, how login works, who has access, which emails, which
+settings, which traps you fell into.
+
+## 7.2 Rules (put them in the project's CLAUDE.md or CONTRIBUTING)
+
+- **No key, token, password or secret value** in the repo, docs, comments,
+  commits, PRs, issues, logs or chat. Not a fragment, not its **shape or
+  prefix** ("the token starts with …"), not an example that looks real.
+- Code and docs carry **only the names** of the variables, as far as the code
+  needs them. One source for the names (for example an `astro:env` schema
+  with `access: "secret"`). Docs point there; they do not repeat it.
+- **Values only** in the platform's secret store (Worker secrets, Pages
+  environment variables marked secret) and locally in `.env` / `.dev.vars`,
+  which are in `.gitignore` and never committed.
+- **Minimal description of the security infrastructure.** Write "locked down,
+  configured on the host", not policy names, scopes, login method or lists of
+  emails. Write "least privilege", not the exact permission or the app name.
+- No secret in a URL, query string, client bundle or `PUBLIC_*` variable. No
+  secret or personal data in logs.
+- **Least privilege** for every token and every app.
+- **Before every commit**, read the diff for keys and for references to them.
+- **On suspicion of a leak:** rotate first, immediately. Clean history after
+  (7.5).
+- **Only `main` goes online**, through a merge (4.5).
+
+## 7.3 Places that slip
+
+- **Code comments.** "Admin API token (prefix …), server-side" is not a key,
+  but it tells a reader what to search for and how to recognise it.
+- **A public changelog or `/version` page.** Reachable by anyone who knows
+  the address, `noindex` or not. Security-related entries are written
+  neutrally ("housekeeping", "updated project notes"), never "closed the …",
+  never a staging hostname.
+- **Deploy guides.** They fill up with policy names, scopes, paths, login
+  methods and "troubleshooting" sections that describe real traps. Keep the
+  order of steps and *where* each thing is configured, nothing more.
+- **Launch checklists.** Security lines stay general.
+- **Account emails** (dev store, admin, partner accounts) in docs tell a
+  phisher which account to target. They are not written down.
+- **Names of apps and integrations** (custom apps, GitHub apps, OAuth apps)
+  do not belong in docs.
+- **Agent configuration files.** No `settings.local.json` or any settings
+  file with keys inside the repo; no `.claude/` folder with credentials.
+  Skills and `CLAUDE.md` are fine. Agent-side credentials live in the
+  agent's own environment, outside the repo, and die with the session.
+
+## 7.4 Preview and staging surfaces
+
+A staging host or preview URL named in public output or in docs is a map to
+the unfinished version of the site. The lock in front of it (Cloudflare
+Access or equivalent) is configured with the **exact host** of each app,
+never a wildcard over the whole domain (4.3). Access given for a preview is
+removed after the release. 2FA on email, host, Git forge and any commerce
+backend for everyone who has access.
+
+## 7.5 Cleaning git history when something was committed
+
+1. **Rotate first**, if the value was real. Cleaning alone is not enough.
+2. Make sure nothing is lost: every branch pushed, nothing open.
+3. Work on a **fresh clone in another folder** with `git filter-repo`
+   (`pip install git-filter-repo`):
+
+   ```bash
+   git clone --no-local <repo> rewrite && cd rewrite
+   printf '%s\n' 'regex:<pattern>==><replacement>' > ../repl.txt
+   git filter-repo --force --refs main <other-branch> --replace-text ../repl.txt
+   ```
+
+4. **Verify:** `git grep -l '<pattern>' $(git rev-list --all)` returns
+   nothing, and the tip tree is unchanged
+   (`git rev-parse <branch>^{tree}` before and after).
+5. **Force-push with a lease:**
+
+   ```bash
+   git push --force-with-lease=main:<old-hash> <url> main:main <other-branch>:<other-branch>
+   ```
+
+   If `main` is protected against force-push, lift the protection briefly and
+   **put it back immediately**.
+6. **Every local copy:** reset to the new refs, delete old branches,
+   `git reflog expire --expire=now --all && git gc --prune=now`. Better: a
+   fresh clone, copying only `.env` / `.dev.vars` over, then `npm ci`. Never
+   keep the old folder around; one push from it brings the old history back.
+7. **What a force-push does NOT clean:** the forge keeps `refs/pull/*/head`
+   for every PR, and old commits stay reachable by hash. Only the forge's
+   support team removes those. On GitHub: support → Repository features →
+   Branches → Removing sensitive data. They need the repo name, what was
+   rewritten (without repeating the value), the branches force-pushed and
+   when, the full hash of the first changed commit
+   (`git log --all --format='%H' -S'<pattern>' --reverse | head -1`), and the
+   range of affected PRs. They only act on genuinely sensitive data; a request
+   about non-secret descriptions is judged case by case. Check the repo is
+   private and has zero forks first: forks keep the old history.
+8. The deploy from `main` runs again; with the same tree at the tip, the
+   site does not change.
+
+## 7.6 Quick checks
+
+```bash
+# settings or credential files tracked
+git ls-files | grep -iE "settings|\.env|dev\.vars|secret|key"
+# known key prefixes across all history (add your services' prefixes)
+git grep -nIE "AKIA[0-9A-Z]{16}|BEGIN (RSA|EC|OPENSSH) PRIVATE|gh[pousr]_[A-Za-z0-9]{36}" $(git rev-list --all)
+# security-infrastructure descriptions in docs and comments
+git grep -nIiE "access polic|one-time pin|client secret|token scope|oauth app" -- '*.md' '*.ts' '*.mjs' '*.astro'
+```
+
+`kekkai ./repo` does the three of them, plus `.gitignore` coverage, tracked
+`.env` / `.dev.vars` / local settings, env files anywhere in history, docs
+that name account emails or staging hosts, and comments that describe a
+credential's shape.
+
+---
+
 # Verification checklist
 
 The rule that matters more than any individual item: **verify the packaged
@@ -719,4 +869,11 @@ output and the live response, never your intention.**
 - [ ] CMS: self-hosted pinned bundle, own CSP, `no-store` + `noindex` header,
       private repo, fine-grained expiring token (or own OAuth Worker), Access on
       its path
+- [ ] Production builds come from `main` only; a push to a working branch starts nothing
+- [ ] `kekkai ./repo` clean: no credential shapes in the tree or the history, no
+      tracked `.env` / local settings, docs describe *where* security is
+      configured and not *how*, no account emails or staging hosts in docs
+- [ ] Public changelog / version page carries no security details or staging hosts
+- [ ] 2FA on every account with access; preview access removed after release;
+      locks scoped to exact hosts
 - [ ] `kekkai` live scan green after deploy

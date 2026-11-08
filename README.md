@@ -19,6 +19,7 @@ edge: Netlify, etc.). The checks are framework-agnostic.
 ```
 npx github:kappa-yashi/kekkai https://www.example.com
 npx github:kappa-yashi/kekkai ./dist
+npx github:kappa-yashi/kekkai ./repo
 ```
 
 or clone and run `node bin/kekkai.mjs <target>`.
@@ -54,6 +55,10 @@ or clone and run `node bin/kekkai.mjs <target>`.
   `wp-login.php`, `admin/` …) with soft-404 detection
 - a sample of inner pages: CSP + HSTS present on every route, inline code
   consistent with each page's own policy
+- **disclosure**: credential-shaped strings (known key prefixes, private key
+  blocks, JWTs, secret assignments) in the document, its JS/CSS and the usual
+  `/version` / `/changelog` routes; staging and preview hosts; vocabulary that
+  describes the security setup; developer comments left in the HTML
 - `/version.txt` build fingerprint and whether it is `no-store`
 
 **Build folder** (`dist/` with its `_headers`)
@@ -76,6 +81,23 @@ or clone and run `node bin/kekkai.mjs <target>`.
   external references
 - `_redirects` parsed: open redirects (`https://:splat`), staging / preview
   hosts, proxy rules to another origin, hostname rules that Pages cannot match
+- the same disclosure scan over every text file of the output
+
+**Repository** (a git working copy; detected by `.git`)
+
+- tracked files that must never be tracked: `.env*`, `.dev.vars`, keys and
+  certificates, `credentials.json`, `.claude/settings.local.json`, editor
+  settings with secrets
+- `.gitignore` coverage for `.env*`, `.dev.vars`, `node_modules`, `dist`,
+  `settings.local.json`
+- credential-shaped strings in every tracked text file
+- docs that describe the security setup (access policies, login method, token
+  scopes, OAuth apps), name staging hosts, or contain account email addresses
+- code comments that describe a credential's shape ("token (prefix …)")
+- **history**: credential shapes across all commits, `.env` / `.dev.vars`
+  committed at any point, `--forbid` strings in history (`--no-history` skips)
+- current branch and remote, with a reminder that production builds come
+  from `main` only
 
 ## Options
 
@@ -84,6 +106,7 @@ or clone and run `node bin/kekkai.mjs <target>`.
 --strict            warnings count as failures (exit 1)
 --no-probe          live: skip the leak-path probes
 --pages N           live: sample N inner pages from the sitemap (default 5)
+--no-history        repo: skip the git-history scan
 --admin <folder>    dist: the CMS/admin folder name
 --forbid a,b,c      strings that must not appear in the output
 ```
@@ -102,7 +125,8 @@ This repository is also a skill: `SKILL.md` tells Claude to run the scanner,
 how to read the report, and in which order to fix things;
 `reference/hardening.md` is the long-form guide (headers template, two CSP
 strategies with code, build fingerprint, host-dashboard traps, leak audit, the
-threat model of a Git-based CMS). Copy the folder to `~/.claude/skills/kekkai`
+threat model of a Git-based CMS, and what the repository itself discloses:
+secrets, docs, changelogs, history rewriting). Copy the folder to `~/.claude/skills/kekkai`
 or add it to your project's skills.
 
 ## Limits
@@ -111,6 +135,8 @@ or add it to your project's skills.
 - Cannot see your host dashboard (bot rules, Access policies, managed
   robots.txt); it only observes the effects.
 - Nonces cannot be verified statically.
+- Credential detection is by shape; a secret that looks like plain text is
+  invisible to it, and a hit is not proof the key is still valid. Rotate anyway.
 - Only scan sites you own or are allowed to test.
 
 ## Licence

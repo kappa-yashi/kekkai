@@ -34,11 +34,13 @@ Two questions, opposite answers:
    ```bash
    node bin/kekkai.mjs https://www.example.com      # live
    node bin/kekkai.mjs ./dist                        # build output + _headers
+   node bin/kekkai.mjs ./repo                        # git working copy: secrets, ignored files, docs that describe the security setup
    node bin/kekkai.mjs ./dist --admin <cms-folder> --forbid codename,staging-host
    ```
 
    `--json` for machine output, `--strict` to make warnings fail, `--no-probe`
-   to skip the leak-path probes, `--pages N` to sample N inner pages.
+   to skip the leak-path probes, `--pages N` to sample N inner pages,
+   `--no-history` to skip the git-history scan in repo mode.
 
    If the skill was installed without the script, fetch it from
    `https://github.com/kappa-yashi/kekkai` (`bin/kekkai.mjs`, zero
@@ -55,6 +57,7 @@ Two questions, opposite answers:
    5. host dashboard audit (PART 4) — things no file in the repo can see
    6. build-output leak audit (PART 5)
    7. CMS surface, if any (PART 6)
+   8. repository and docs hygiene (PART 7) — what the repo itself discloses
 
 4. **Verify against the live response, not against intent.** On edge hosts a
    fix that looks obviously correct can silently do nothing. After deploy, run
@@ -77,6 +80,11 @@ Two questions, opposite answers:
 | inline event handler | blocked by a `'self'`/hash CSP and an XSS sink | `addEventListener` in a bundled module |
 | `<script>` inside an SVG | executes when inlined or embedded as `<object>` | strip it; serve untrusted SVGs only as `<img>` |
 | open redirect in `_redirects` | `https://:splat` sends users anywhere | fixed destination hosts only |
+| credential-shaped string (output, tree or history) | a key is public, or was | **rotate first**, then remove; history needs `git filter-repo` + forge support (PART 7.5) |
+| staging / preview host in output or docs | a map to the unfinished site | remove; lock previews with exact-host Access |
+| docs describe the security setup | policies, scopes, login method, app names, account emails are reconnaissance | docs say *where* it is configured, not *how* (PART 7.2–7.3) |
+| tracked `.env` / `settings.local.json` / `.claude/*.json` | local credentials in the repo | untrack, `.gitignore`, rotate |
+| developer HTML comment | TODO/password/admin notes shipped to every visitor | strip comments in the build |
 | HSTS preload on | one-way door for the whole domain | keep only if it was a decision for this domain |
 | no `version.txt` | "is the new build live?" has no one-request answer | ship a `no-store` fingerprint (PART 3) |
 
@@ -90,6 +98,7 @@ matches the finding; do not read it all for a green report.
 ## What this skill does not do
 
 - It is not a vulnerability scanner for server-side applications.
+- Credential detection is by shape (known prefixes, key blocks, assignments). It cannot see a secret that looks like ordinary text, and it cannot know whether a match is still valid — treat every hit as live until rotated.
 - It cannot see your host dashboard (bot rules, Access policies, managed
   robots.txt injection). PART 4 is a checklist for that; the live scan only
   observes the effects.

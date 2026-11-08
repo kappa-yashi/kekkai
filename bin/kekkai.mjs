@@ -4,6 +4,7 @@
 //
 //   kekkai https://www.example.com          scan the live site (read-only GETs)
 //   kekkai ./dist                           scan a build output folder (+ its _headers)
+//   kekkai ./repo                           scan a git working copy (secrets, ignored files, docs that describe the security setup)
 //
 // Options:
 //   --json              machine-readable output
@@ -12,22 +13,25 @@
 //   --admin <folder>    dist mode: the CMS/admin folder name; it must not be named outside itself
 //   --forbid a,b,c      strings that must not appear anywhere in the output (codenames, staging hosts…)
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
+//   --no-history        repo mode: skip the git-history secret scan
 //
 // Only scan sites you own or are allowed to test.
 
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, extname, sep } from 'node:path';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5 };
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true };
 let target = '';
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--json') opt.json = true;
   else if (a === '--strict') opt.strict = true;
   else if (a === '--no-probe') opt.probe = false;
+  else if (a === '--no-history') opt.history = false;
   else if (a === '--admin') opt.admin = argv[++i] || '';
   else if (a === '--forbid') opt.forbid = (argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean);
   else if (a === '--pages') opt.pages = Number(argv[++i]) || 5;
@@ -41,8 +45,9 @@ function usage() {
 
   kekkai https://www.example.com      live scan (read-only GET requests)
   kekkai ./dist                       scan a build folder (+ _headers)
+  kekkai ./repo                       scan a git working copy (auto-detected by .git)
 
-  --json  --strict  --no-probe  --admin <folder>  --forbid a,b,c  --pages N`);
+  --json  --strict  --no-probe  --no-history  --admin <folder>  --forbid a,b,c  --pages N`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -118,6 +123,58 @@ function findEmails(s) {
   return [...out];
 }
 const TEXT_EXT = new Set(['.html', '.htm', '.xml', '.txt', '.json', '.js', '.mjs', '.css', '.svg', '.webmanifest', '.md', '.rss', '.atom']);
+
+// ── disclosure scanners (shared by live, dist and repo modes) ──
+// Well-known credential shapes. Prefixes only; nothing here is a real value.
+const SECRET_PATTERNS = [
+  ['AWS access key', /\bAKIA[0-9A-Z]{16}\b/],
+  ['private key block', /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY/],
+  ['GitHub token', /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{60,}\b/],
+  ['GitLab token', /\bglpat-[A-Za-z0-9_-]{20,}\b/],
+  ['Slack token', /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/],
+  ['Stripe key', /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b/],
+  ['Shopify token', /\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b/],
+  ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
+  ['SendGrid key', /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/],
+  ['Mailgun key', /\bkey-[a-f0-9]{32}\b/],
+  ['Twilio key', /\bSK[a-f0-9]{32}\b/],
+  ['npm token', /\bnpm_[A-Za-z0-9]{36}\b/],
+  ['OpenAI-style key', /\bsk-[A-Za-z0-9_-]{32,}\b/],
+  ['Cloudflare API token shape', /\b(?:cf|cloudflare)[_-]?(?:api[_-]?)?token\s*[:=]\s*["']?[A-Za-z0-9_-]{40}\b/i],
+  ['JWT', /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/],
+  ['assignment of a secret', /\b(?:api[_-]?key|secret|password|passwd|client_secret|access[_-]?token|auth[_-]?token|private[_-]?key)["']?\s*[:=]\s*["'][^"'\s]{16,}["']/i],
+];
+function findSecrets(s) {
+  const out = [];
+  for (const [name, re] of SECRET_PATTERNS) { const m = s.match(re); if (m) out.push(`${name} (…${m[0].slice(-6).replace(/[^a-z0-9]/gi, '*')})`); }
+  return out;
+}
+// Hosts that belong to a build pipeline, not to a public page.
+const STAGING_RE = /\b(?:[a-z0-9-]+\.(?:pages|workers)\.dev|[a-z0-9-]+\.netlify\.app|[a-z0-9-]+\.vercel\.app|[a-z0-9-]+\.github\.io|[a-z0-9-]+\.ngrok(?:-free)?\.app|(?:staging|stage|stg|dev|test|preview|beta)\.[a-z0-9-]+\.[a-z]{2,}|localhost:\d+|127\.0\.0\.1:\d+)\b/gi;
+function findStagingHosts(s) { return [...new Set([...s.matchAll(STAGING_RE)].map((m) => m[0]))]; }
+// Words that describe how the security is set up. In a changelog, a version page or a doc they tell an attacker what to look for.
+const SECURITY_VOCAB_RE = /\b(?:access polic(?:y|ies)|one-?time pin|otp login|oauth (?:app|proxy|client)|client[_ ]secret|fine-?grained (?:token|pat)|personal access token|token scopes?|api scopes?|service token|bypass rule|allowlist(?:ed)? (?:ip|email)s?|zero trust|cloudflare access|2fa enforced|rotated? (?:the )?(?:key|token|secret)|secret rotation|exposure fix|login method)\b/gi;
+function findSecurityVocab(s) { return [...new Set([...s.matchAll(SECURITY_VOCAB_RE)].map((m) => m[0].toLowerCase()))]; }
+// HTML comments that carry developer notes.
+function findLeakyComments(html) {
+  const out = [];
+  for (const m of html.matchAll(/<!--([\s\S]*?)-->/g)) {
+    const c = m[1];
+    if (/\b(?:todo|fixme|hack|xxx|password|passwd|secret|token|api[_ -]?key|admin|staging|localhost|127\.0\.0\.1|debug|temporary|remove before|do not commit)\b/i.test(c)) out.push(c.trim().replace(/\s+/g, ' ').slice(0, 80));
+  }
+  return out;
+}
+// Run the three text scanners over one text blob and report under the current section.
+function checkDisclosureText(s, label, { html = false } = {}) {
+  const sec = findSecrets(s);
+  if (sec.length) fail('secret', `${label}: credential-shaped string(s): ${sec.join(', ')} — rotate first, then remove`);
+  const hosts = findStagingHosts(s);
+  if (hosts.length) warn('staging-host', `${label}: staging / preview host(s) in public output: ${hosts.slice(0, 4).join(', ')}`);
+  const vocab = findSecurityVocab(s);
+  if (vocab.length) warn('security-vocab', `${label}: describes the security setup (${vocab.slice(0, 4).join(', ')}) — public text should say "locked down", not how`);
+  if (html) { const c = findLeakyComments(s); if (c.length) warn('html-comments', `${label}: ${c.length} developer comment(s) left in the HTML, e.g. "${c[0]}"`); }
+  return sec.length + hosts.length + vocab.length;
+}
 
 // Shared: evaluate one set of response headers for a document.
 function checkDocHeaders(h, label) {
@@ -375,6 +432,17 @@ async function liveScan(input) {
     }
   }
 
+  // disclosure: the document, every fetched same-origin JS/CSS, and the usual version/changelog routes
+  section('Disclosure');
+  let discl = checkDisclosureText(doc.text, 'document', { html: true });
+  for (const au of assetUrls) { const a = await get(au.href); if (a.status === 200 && !/\.(woff2?|ttf|otf)$/i.test(au.pathname)) discl += checkDisclosureText(a.text, au.pathname); }
+  for (const p of ['version', 'version.txt', 'changelog', 'changelog.txt', 'CHANGELOG.md', 'release-notes', 'humans.txt']) {
+    const r = await get(`${origin}/${p}`); if (r.status !== 200) continue;
+    discl += checkDisclosureText(r.text, `/${p}`, { html: /html/i.test(r.headers['content-type'] || '') });
+    if (findSecurityVocab(r.text).length || findStagingHosts(r.text).length) warn('changelog', `/${p} is public even with noindex — write security-related entries neutrally ("housekeeping", "updated project notes")`);
+  }
+  if (!discl) pass('disclosure', 'no credential shapes, staging hosts or security-setup vocabulary in the document, its assets or version/changelog routes');
+
   // SVG files referenced by the document (as <img>/<object>/<use>): scripts inside them run when embedded as <object>/inline
   const svgSeen = new Set();
   for (const ref of html.svgRefs) {
@@ -556,6 +624,16 @@ function distScan(dir) {
   for (const f of text) { if (f.rel === '/_headers' || (opt.admin && f.rel.startsWith(`/${opt.admin}/`))) continue; for (const m of read(f).matchAll(/https?:\/\/(github\.com|gitlab\.com|bitbucket\.org)\/([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)/g)) forges.set(`${m[1]}/${m[2]}`, f.rel); }
   if (forges.size) info('forge', `repository links in the output (fine for public release repos, a leak for the site's own): ${[...forges.keys()].slice(0, 8).join(', ')}`);
 
+  // disclosure over every text file
+  section('Disclosure');
+  let discl = 0, scanned = 0;
+  for (const f of text) {
+    if (f.rel === '/_headers' || f.rel === '/_redirects' || (opt.admin && f.rel.startsWith(`/${opt.admin}/`))) continue;
+    scanned++; discl += checkDisclosureText(read(f), f.rel, { html: /\.html?$/.test(f.rel) });
+  }
+  if (!discl) pass('disclosure', `${scanned} text file(s): no credential shapes, staging hosts or security-setup vocabulary`);
+  section('Build output');
+
   // emails in non-HTML text files and inside <script>
   const emailFiles = [];
   for (const f of text) {
@@ -671,27 +749,124 @@ function distScan(dir) {
   else info('version', 'no /version.txt build fingerprint — add one so "is the new build live?" has a one-request answer');
 }
 
+// ───────────────────────────── repo mode ─────────────────────────────
+function git(dir, args, { maxBuffer = 64 * 1024 * 1024, okStatus = [0] } = {}) {
+  try { return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer }); }
+  catch (e) { return okStatus.includes(e.status) ? (e.stdout || '') : null; }
+}
+function repoScan(dir) {
+  section('Repository');
+  const tracked = (git(dir, ['ls-files', '-z']) || '').split('\0').filter(Boolean);
+  if (!tracked.length) { fail('git', `${dir} has a .git folder but git ls-files returned nothing (is git installed?)`); return; }
+  info('tracked', `${tracked.length} tracked file(s) in ${dir}`);
+  const branch = (git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']) || '').trim();
+  if (branch) info('branch', `current branch: ${branch}${branch === 'main' || branch === 'master' ? '' : ' — make sure the host builds production from main, not from this branch (guide PART 7)'}`);
+
+  // files that must never be tracked
+  const bad = tracked.filter((f) => /(^|\/)(\.env(\.[^/]*)?|\.dev\.vars|\.npmrc|\.netrc|\.pypirc|id_(?:rsa|ed25519|ecdsa)(?:\.pub)?|[^/]*\.pem|[^/]*\.p12|[^/]*\.pfx|[^/]*\.key|credentials(?:\.json)?|service-account[^/]*\.json|\.claude\/settings\.local\.json|\.claude\/[^/]*\.json|settings\.local\.json|\.vscode\/settings\.json|\.idea\/[^/]*|wrangler\.toml|\.wrangler\/.*|\.dev\.vars\.[^/]*)$/i.test(f));
+  const benign = (f) => /\.example$|\.sample$|\.template$|\.pub$/i.test(f) || (/wrangler\.toml$/.test(f) && !/(secret|token|key)\s*=/i.test(readFileSync(join(dir, f), 'utf8')));
+  const really = bad.filter((f) => !benign(f));
+  if (really.length) fail('tracked-secrets', `credential / local-config files are tracked: ${really.slice(0, 8).join(', ')} — remove from the index, add to .gitignore, rotate what they held`);
+  else pass('tracked-secrets', 'no .env / .dev.vars / key / local settings files tracked');
+  const claudeDir = tracked.filter((f) => /^\.claude\//.test(f) && !/^\.claude\/(?:skills|commands|agents)\//.test(f) && !/CLAUDE\.md$/.test(f));
+  if (claudeDir.length) warn('claude-dir', `.claude/ files tracked: ${claudeDir.slice(0, 4).join(', ')} — settings.local.json and anything with keys must stay out; skills/ and CLAUDE.md are fine`);
+
+  // .gitignore coverage
+  const gi = existsSync(join(dir, '.gitignore')) ? readFileSync(join(dir, '.gitignore'), 'utf8') : '';
+  const want = [['.env', /^\s*\.env(\*|\.\*)?\s*$|^\s*\*?\.env\*/m], ['.dev.vars', /^\s*\.dev\.vars/m], ['node_modules', /^\s*\/?node_modules\/?\s*$/m], ['dist', /^\s*\/?dist\/?\s*$/m], ['.claude/settings.local.json', /settings\.local\.json|^\s*\.claude\/?\s*$/m]];
+  const missing = want.filter(([, re]) => !re.test(gi)).map(([n]) => n);
+  if (!gi) warn('gitignore', 'no .gitignore');
+  else if (missing.length) warn('gitignore', `.gitignore does not cover: ${missing.join(', ')}`);
+  else pass('gitignore', '.gitignore covers .env*, .dev.vars, node_modules, dist, settings.local.json');
+
+  // secrets and security vocabulary in tracked text files
+  section('Working tree');
+  let secretHits = 0, vocabFiles = [], stagingFiles = [], emailFiles = [];
+  const textish = tracked.filter((f) => /\.(md|mdx|txt|json|jsonc|ya?ml|toml|ts|tsx|js|mjs|cjs|astro|svelte|vue|html|css|env|sh|ps1|ini|cfg|conf|xml|svg)$/i.test(f) || /^[^.]*$/.test(f.split('/').pop()));
+  for (const f of textish) {
+    let s; try { s = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    if (s.length > 2 * 1024 * 1024 || /\u0000/.test(s.slice(0, 1000))) continue;
+    if (/(^|\/)package-lock\.json$|(^|\/)pnpm-lock\.yaml$|(^|\/)yarn\.lock$/.test(f)) continue;
+    const sec = findSecrets(s).filter((x) => !/^assignment/.test(x) || !/\.(md|example|sample)$/i.test(f));
+    if (sec.length) { secretHits++; fail('secret', `${f}: credential-shaped string(s): ${sec.join(', ')} — rotate first, then remove and rewrite history`); }
+    if (/\.(md|mdx|txt)$/i.test(f)) {
+      const v = findSecurityVocab(s); if (v.length) vocabFiles.push(`${f} (${v.slice(0, 3).join(', ')})`);
+      const h = findStagingHosts(s).filter((x) => !/^(localhost|127\.0\.0\.1)/.test(x)); if (h.length) stagingFiles.push(`${f} (${h[0]})`);
+      const e = findEmails(s); if (e.length) emailFiles.push(`${f} (${e[0]})`);
+    }
+  }
+  if (!secretHits) pass('secret', `${textish.length} text file(s): no credential-shaped strings`);
+  if (vocabFiles.length) warn('docs-security', `docs describe the security setup: ${vocabFiles.slice(0, 5).join('; ')} — docs should say where it is configured, not how (policies, scopes, login method, app names)`);
+  else pass('docs-security', 'docs do not describe the security setup');
+  if (stagingFiles.length) warn('docs-staging', `docs name staging / preview hosts: ${stagingFiles.slice(0, 4).join('; ')}`);
+  if (emailFiles.length) warn('docs-email', `docs contain account email addresses: ${emailFiles.slice(0, 4).join('; ')} — they tell a phisher which account to target`);
+  const comments = [];
+  for (const f of textish.filter((f) => /\.(ts|tsx|js|mjs|cjs|astro|svelte|vue)$/i.test(f))) {
+    let s; try { s = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    for (const m of s.matchAll(/(?:\/\/|\/\*|<!--|#)\s*([^\n]*)/g)) {
+      const c = m[1];
+      if (/\\b|\(\?:|\[\^/.test(c)) continue; // regex source, not prose
+      if (/\b(?:token|secret|api key|password|credential)\b/i.test(c) && /\b(?:prefix|starts with|begins with|format|looks like|scoped? to|permission|read\/write|expires?)\b/i.test(c)) { comments.push(`${f}: "${c.trim().slice(0, 70)}"`); if (comments.length > 6) break; }
+    }
+    if (comments.length > 6) break;
+  }
+  if (comments.length) warn('code-comments', `comments that describe credentials or their shape: ${comments.slice(0, 3).join(' | ')} — a comment like "token (prefix …), server-side" is a search hint`);
+  else pass('code-comments', 'no comments describing credentials');
+
+  // history
+  if (opt.history) {
+    section('History');
+    const revs = (git(dir, ['rev-list', '--all', '--count']) || '0').trim();
+    info('commits', `${revs} commit(s) across all refs`);
+    const patterns = ['AKIA[0-9A-Z]{16}', 'BEGIN (RSA|EC|OPENSSH|DSA|PGP )?PRIVATE KEY', '\\bgh[pousr]_[A-Za-z0-9]{36,}', 'github_pat_[A-Za-z0-9_]{60,}', 'xox[abprs]-[A-Za-z0-9-]{10,}', '[sr]k_(live|test)_[A-Za-z0-9]{16,}', 'shp(at|ca|pa|ss)_[a-fA-F0-9]{32}', 'AIza[0-9A-Za-z_-]{35}', 'npm_[A-Za-z0-9]{36}', 'glpat-[A-Za-z0-9_-]{20,}'];
+    const revList = (git(dir, ['rev-list', '--all', '--max-count=4000']) || '').split('\n').filter(Boolean);
+    let out = '', failed = false;
+    for (let i = 0; i < revList.length; i += 200) {
+      const chunk = git(dir, ['grep', '-l', '-I', '-E', patterns.join('|'), ...revList.slice(i, i + 200)], { maxBuffer: 256 * 1024 * 1024, okStatus: [0, 1] });
+      if (chunk === null) { failed = true; break; }
+      out += chunk;
+    }
+    if (failed) info('history-scan', 'git grep over history failed (shallow clone or very large repo?) — run it by hand: git grep -lE <patterns> $(git rev-list --all)');
+    else {
+      if (revList.length >= 4000) info('history-scan', 'history scan capped at the 4000 most recent commits');
+      const hits = [...new Set(out.split('\n').filter(Boolean).map((l) => l.replace(/^[0-9a-f]{7,40}:/, '')))];
+      if (hits.length) fail('history-secret', `credential-shaped strings in git history (${hits.length} file path(s), e.g. ${hits.slice(0, 3).join(', ')}) — rotate, then rewrite history with git filter-repo and ask GitHub Support to purge PR refs (guide PART 7)`);
+      else pass('history-secret', 'no credential-shaped strings anywhere in history');
+    }
+    const envHist = git(dir, ['log', '--all', '--diff-filter=A', '--name-only', '--format=', '--', '.env', '.env.*', '**/.env', '**/.env.*', '.dev.vars', '**/.dev.vars']);
+    const envFiles = [...new Set((envHist || '').split('\n').filter(Boolean))].filter((f) => !/\.(example|sample|template)$/i.test(f));
+    if (envFiles.length) fail('history-env', `env files were committed at some point: ${envFiles.slice(0, 4).join(', ')} — they are still in history; rotate and rewrite`);
+    else pass('history-env', 'no .env / .dev.vars ever committed');
+    const forbidden = opt.forbid.length ? git(dir, ['grep', '-l', '-i', '-I', '-F', ...opt.forbid.flatMap((w) => ['-e', w]), ...revList.slice(0, 200)], { okStatus: [0, 1] }) : null;
+    if (opt.forbid.length) { const n = (forbidden || '').split('\n').filter(Boolean).length; if (n) warn('history-forbid', `forbidden strings appear in history (${n} path(s))`); else pass('history-forbid', 'forbidden strings never appear in history'); }
+  }
+  const remote = (git(dir, ['remote', 'get-url', 'origin']) || '').trim();
+  if (remote) { section('Repository'); info('remote', `origin: ${remote.replace(/\/\/[^@]+@/, '//***@')}${/github\.com/.test(remote) ? ' — if the site has a CMS or drafts, this repo must be private; check forks = 0 before any history rewrite' : ''}`); }
+}
+
 // ───────────────────────────── run ─────────────────────────────
 const isDir = !/^https?:\/\//i.test(target) && existsSync(target) && statSync(target).isDirectory();
-if (isDir) distScan(target); else await liveScan(target);
+const isRepo = isDir && existsSync(join(target, '.git')) && !existsSync(join(target, '_headers')) && !existsSync(join(target, 'index.html'));
+if (isRepo) repoScan(target); else if (isDir) distScan(target); else await liveScan(target);
 
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
 for (const r of results) counts[r.level]++;
 const failed = counts.fail > 0 || (opt.strict && counts.warn > 0);
 if (opt.json) {
-  console.log(JSON.stringify({ target, mode: isDir ? 'dist' : 'live', counts, ok: !failed, results }, null, 2));
+  console.log(JSON.stringify({ target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: !failed, results }, null, 2));
 } else {
   const tty = process.stdout.isTTY;
   const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
   const mark = { pass: c(32, '✔'), warn: c(33, '!'), fail: c(31, '✖'), info: c(90, '·') };
   let last = '';
-  console.log(`\nkekkai (結界) — ${isDir ? 'build output' : 'live'} scan of ${target}\n`);
+  console.log(`\nkekkai (結界) — ${isRepo ? 'repository' : isDir ? 'build output' : 'live'} scan of ${target}\n`);
   for (const r of results) {
     if (r.section !== last) { console.log(c(1, `  ${r.section}`)); last = r.section; }
     console.log(`    ${mark[r.level]} ${r.msg}`);
     if (r.detail && r.level !== 'pass') for (const l of String(r.detail).split('\n')) console.log(c(90, `        ${l}`));
   }
   console.log(`\n  ${c(32, counts.pass + ' pass')}  ${c(33, counts.warn + ' warn')}  ${c(31, counts.fail + ' fail')}  ${c(90, counts.info + ' info')}`);
-  console.log(failed ? c(31, '\n  BOUNDARY BROKEN — fix the ✖ items, then run again against the LIVE response.\n') : c(32, '\n  BOUNDARY HOLDS — no failures. Re-run after deploy: the live response is the only truth.\n'));
+  const again = isRepo ? 'then scan the build and the live site' : 'then run again against the LIVE response';
+  console.log(failed ? c(31, `\n  BOUNDARY BROKEN — fix the ✖ items, ${again}.\n`) : c(32, isRepo ? '\n  BOUNDARY HOLDS — repository clean. Next: scan dist/ and the live site.\n' : '\n  BOUNDARY HOLDS — no failures. Re-run after deploy: the live response is the only truth.\n'));
 }
 process.exit(failed ? 1 : 0);

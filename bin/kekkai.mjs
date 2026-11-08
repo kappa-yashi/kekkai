@@ -521,7 +521,7 @@ async function liveScan(input) {
   const js = html.externalScripts.find((s) => { try { return new URL(s, finalUrl).origin === finalUrl.origin; } catch { return false; } });
   const font = doc.text.match(/<link[^>]+as\s*=\s*["']font["'][^>]*href\s*=\s*["']([^"']+)["']/i)?.[1] || doc.text.match(/href\s*=\s*["']([^"']+\.woff2?[^"']*)["']/i)?.[1];
   for (const [kind, href] of [['stylesheet', css], ['script', js], ['font', font]]) {
-    if (!href) { info(`asset-${kind}`, `no ${kind} found in the document`); continue; }
+    if (!href) { info(`asset-${kind}`, kind === 'script' && html.inlineScripts.length ? 'no external script — scripts are inline (hashed)' : kind === 'stylesheet' && html.styleTags ? 'no external stylesheet — CSS is inlined' : `no ${kind} found in the document`); continue; }
     let au; try { au = new URL(href, finalUrl); } catch { continue; }
     if (au.origin !== finalUrl.origin) { info(`asset-${kind}`, `${kind} is cross-origin (${au.origin}) — remember its ACAO must name this origin`); continue; }
     const a = await get(au.href);
@@ -658,13 +658,13 @@ async function liveScan(input) {
     section('Inner pages');
     // sample by path on the scanned origin, so a local preview of a sitemap that names the real domain still works
     const sample = [...new Set(pageUrls.map((l) => { try { return origin + new URL(l).pathname; } catch { return null; } }).filter(Boolean))].filter((l) => l !== finalUrl.href && l !== `${origin}/`).slice(0, opt.pages);
-    const policies = new Map(); let scannedPages = 0;
+    const policies = new Map(); let scannedPages = 0, redirected = 0;
     for (let l of sample) {
       let r = await get(l), hops = 0;
       while (r.status >= 300 && r.status < 400 && r.headers.location && hops < 3) {
         const next = new URL(r.headers.location, l);
         if (next.origin !== origin) break;
-        info('page-redirect', `${new URL(l).pathname} → ${r.status} → ${next.pathname}${r.status === 307 || r.status === 302 ? ' (temporary; a canonical URL change wants a 301)' : ''}`);
+        redirected++; info('page-redirect', `${new URL(l).pathname} → ${r.status} → ${next.pathname}${r.status === 307 || r.status === 302 ? ' (temporary; a canonical URL change wants a 301)' : ''}`);
         l = next.href; r = await get(l); hops++;
       }
       if (r.status !== 200) { warn('page', `${l} → ${r.status}`); continue; }
@@ -686,6 +686,7 @@ async function liveScan(input) {
       if (ih.jsonldErrors.length) fail('page-jsonld', `${new URL(l).pathname}: JSON-LD does not parse`);
     }
     if (policies.size > 1) info('page-policies', `${policies.size} distinct CSPs across sampled pages (fine if intentional: docs vs text mirror vs admin)`);
+    if (redirected) warn('sitemap-redirects', `${redirected} of ${sample.length} sampled sitemap URL(s) redirect — the sitemap should list the final URLs (trailing slash included); crawlers follow, but it costs a request per page and dilutes canonicals`);
     if (!scannedPages) info('pages', `no inner page could be scanned (${sample.length} sampled)`);
     else if (results.filter((r) => r.section === 'Inner pages' && r.level === 'fail').length === 0) pass('pages', `${scannedPages} inner page(s): CSP + HSTS present, inline code consistent`);
   }

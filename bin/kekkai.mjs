@@ -171,11 +171,24 @@ const SECRET_PATTERNS = [
   ['OpenAI-style key', /\bsk-[A-Za-z0-9_-]{32,}\b/],
   ['Cloudflare API token shape', /\b(?:cf|cloudflare)[_-]?(?:api[_-]?)?token\s*[:=]\s*["']?[A-Za-z0-9_-]{40}\b/i],
   ['JWT', /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/],
-  ['assignment of a secret', /\b(?:api[_-]?key|secret|password|passwd|client_secret|access[_-]?token|auth[_-]?token|private[_-]?key)["']?\s*[:=]\s*["'][^"'\s]{16,}["']/i],
+  ['assignment of a secret', /\b(?:api[_-]?key|secret|password|passwd|client_secret|access[_-]?token|auth[_-]?token|private[_-]?key)["']?\s*[:=]\s*["']([^"'\s]{16,})["']/i, (m) => looksLikeCredential(m[1])],
 ];
+// A credential-looking value: long, mixed character classes, not a word, not a selector/label/URL/path.
+function looksLikeCredential(v) {
+  if (/^[A-Za-z]+$/.test(v)) return false;                                   // a word: "cookieConsentSubmit"
+  if (/^[a-z]+(?:[A-Z][a-z0-9]*)+$/.test(v)) return false;                     // camelCase identifier
+  if (/^[#.\/]|^https?:|^\$\{|^\{\{|^%|^<|^\(|^\[|^__/.test(v)) return false;   // selector, URL, path, template, markup
+  if (/[\s\u0370-\u03ff]/.test(v)) return false;                              // prose or Greek
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9_-]/].filter((re) => re.test(v)).length; // _ and - are identifier glue, not entropy
+  const digits = (v.match(/[0-9]/g) || []).length;
+  if (digits === 0) return classes >= 3;           // e.g. base64 with + / =
+  return classes >= 3 || digits >= 4;
+}
 function findSecrets(s) {
   const out = [];
-  for (const [name, re] of SECRET_PATTERNS) { const m = s.match(re); if (m) out.push(`${name} (…${m[0].slice(-6).replace(/[^a-z0-9]/gi, '*')})`); }
+  for (const [name, re, accept] of SECRET_PATTERNS) {
+    for (const m of s.matchAll(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'))) { if (!accept || accept(m)) { out.push(`${name} (…${m[0].slice(-6).replace(/[^a-z0-9]/gi, '*')})`); break; } }
+  }
   return out;
 }
 // Hosts that belong to a build pipeline, not to a public page.
@@ -297,7 +310,7 @@ function reportInline(doc, policies, label) {
   const ev = evaluateDoc(doc, policies);
   const n = doc.inlineScripts.length;
   if (!policies.length) info('inline-js', `${n} inline script(s), no CSP to judge them against`);
-  else if (!ev.scriptsGoverned) fail('csp-script', `no policy on ${label} restricts scripts (no script-src, no default-src) — scripts are unrestricted`);
+  else if (!ev.scriptsGoverned) { if (doc.metaCsps.length) fail('csp-script', `no policy on ${label} restricts scripts (no script-src, no default-src in header or <meta>) — scripts are unrestricted`); }
   else if (n === 0) pass('inline-js', 'no executable inline <script>');
   else if (!ev.blockedScripts.length) pass('inline-js', `${n} inline script(s), all allowed by every policy${ev.nonceUsed ? ' (nonce)' : ''}`);
   else {
@@ -362,6 +375,12 @@ function checkDocHeaders(h, label, { hasMeta = false } = {}) {
 }
 
 function checkCspDirectives(d, where, { hasMeta = false } = {}) {
+  const NON_FETCH = new Set(['frame-ancestors', 'report-uri', 'report-to', 'upgrade-insecure-requests', 'block-all-mixed-content', 'sandbox']);
+  if (Object.keys(d).every((k) => NON_FETCH.has(k))) {
+    if (hasMeta) info('csp-script', `${where} CSP carries only ${Object.keys(d).join(', ')}; the page's <meta> CSP is evaluated below`);
+    else fail('csp-script', `${where} CSP contains only ${Object.keys(d).join(', ')} — that is a framing/reporting header, not a content policy: scripts, styles, objects and base are unrestricted. Start from default-src 'none' and add what the site needs.`);
+    return;
+  }
   const script = effective(d, 'script-src-elem');
   if (!script) { if (hasMeta) info('csp-script', `${where} CSP does not restrict scripts; the page's <meta> CSP is evaluated below`); else fail('csp-script', `${where} CSP has neither script-src nor default-src — scripts are unrestricted`); }
   else {
@@ -489,18 +508,18 @@ async function liveScan(input) {
   if (!local) {
   const h1 = await get(httpUrl);
   if (h1.status === 0) info('http', `http://${finalUrl.host}/ not reachable (${h1.error}) — port 80 closed; fine, but check HSTS preload`);
-  else if (h1.status === 301 && /^https:/i.test(h1.headers.location || '')) pass('http', `http:// → 301 → https://`);
-  else if (h1.status >= 300 && h1.status < 400 && /^https:/i.test(h1.headers.location || '')) warn('http', `http:// redirects to https with ${h1.status} — use a 301`);
+  else if ((h1.status === 301 || h1.status === 308) && /^https:/i.test(h1.headers.location || '')) pass('http', `http:// → ${h1.status} → https://`);
+  else if (h1.status >= 300 && h1.status < 400 && /^https:/i.test(h1.headers.location || '')) warn('http', `http:// redirects to https with ${h1.status} (temporary) — use a permanent 301 or 308`);
   else fail('http', `http://${finalUrl.host}/ answers ${h1.status} instead of redirecting to https`);
   // apex <-> www
   const other = host.startsWith('www.') ? host.slice(4) : `www.${host}`;
   const o = await get(`https://${other}/`);
   if (o.status === 0) info('alias', `https://${other}/ not reachable (${o.error}) — only one hostname serves the site`);
-  else if (o.status === 301 && new URL(o.headers.location || '/', `https://${other}/`).host === host) {
-    if (host.startsWith('www.')) pass('alias', `${other} → 301 → ${host}`);
+  else if ((o.status === 301 || o.status === 308) && new URL(o.headers.location || '/', `https://${other}/`).host === host) {
+    if (host.startsWith('www.')) pass('alias', `${other} → ${o.status} → ${host}`);
     else warn('apex-primary', `${other} → 301 → ${host}: the apex is the primary host. Make www primary instead — cookies set on the apex reach every subdomain (a future staging., cms., api. inherits them), and an apex cannot be a CNAME, so CDN or failover changes need a provider that flattens it. Redirect apex → www with a 301 and keep absolute canonicals on www.`);
   }
-  else if (o.status >= 300 && o.status < 400) warn('alias', `${other} redirects with ${o.status} to ${o.headers.location} — want a 301 to ${host}`);
+  else if (o.status >= 300 && o.status < 400) warn('alias', `${other} redirects with ${o.status} to ${o.headers.location} — want a permanent 301/308 to ${host}`);
   else if (o.status === 200) warn('alias', `https://${other}/ serves the site directly (200) — two hostnames with the same content; redirect ${host.startsWith('www.') ? other + ' → ' + host : host + ' → ' + other + ' (www as primary)'} with a 301 and keep absolute canonicals`);
   else if (!host.startsWith('www.') && o.status === 0) warn('apex-primary', `the site lives on the apex and www does not resolve — make www the primary host (cookie isolation from subdomains, CNAME-able for CDN/failover) and 301 the apex to it`);
   else info('alias', `https://${other}/ answers ${o.status}`);
@@ -518,9 +537,9 @@ async function liveScan(input) {
     try { const c = new URL(html.canonical, finalUrl); if (c.host !== finalUrl.host) warn('canonical', `canonical points at another host: ${html.canonical}`); else if (!/^https?:\/\//i.test(html.canonical)) warn('canonical', `canonical is relative (${html.canonical}) — make it absolute so mirrors/previews cannot compete`); else pass('canonical', `canonical ${html.canonical}`); } catch { warn('canonical', `canonical is not a URL: ${html.canonical}`); }
   } else warn('canonical', 'no <link rel="canonical"> — a pages.dev / preview copy can compete with the real domain in search');
   const extOrigins = [...new Set(html.externalScripts.map((s) => { try { return new URL(s, finalUrl).origin; } catch { return s; } }).filter((o) => o !== finalUrl.origin))];
-  checkSri(html, finalUrl.origin, 'document');
-  section('Document');
   if (extOrigins.length) warn('third-party-js', `third-party scripts from: ${extOrigins.join(', ')} — each one can run anything on the page`); else pass('third-party-js', 'all scripts are same-origin');
+
+  checkSri(html, finalUrl.origin, 'document');
 
   // assets: css, js, font
   section('Assets');
@@ -667,6 +686,7 @@ async function liveScan(input) {
     // sample by path on the scanned origin, so a local preview of a sitemap that names the real domain still works
     const sample = [...new Set(pageUrls.map((l) => { try { return origin + new URL(l).pathname; } catch { return null; } }).filter(Boolean))].filter((l) => l !== finalUrl.href && l !== `${origin}/`).slice(0, opt.pages);
     const policies = new Map(); let scannedPages = 0, redirected = 0;
+    const pageIssues = new Map(); const pageIssue = (issue, pth) => (pageIssues.get(issue) ?? pageIssues.set(issue, []).get(issue)).push(pth);
     for (let l of sample) {
       let r = await get(l), hops = 0;
       while (r.status >= 300 && r.status < 400 && r.headers.location && hops < 3) {
@@ -677,21 +697,26 @@ async function liveScan(input) {
       }
       if (r.status !== 200) { warn('page', `${l} → ${r.status}`); continue; }
       scannedPages++;
-      const h = r.headers; const csp = h['content-security-policy'];
-      if (!csp && !/http-equiv\s*=\s*["']content-security-policy/i.test(r.text)) fail('page-csp', `${new URL(l).pathname} has NO CSP (neither header nor <meta>; route missing from the headers path list?)`);
+      const h = r.headers; const csp = h['content-security-policy']; const pth = new URL(l).pathname;
+      if (!csp && !/http-equiv\s*=\s*["']content-security-policy/i.test(r.text)) pageIssue('no CSP (neither header nor <meta>)', pth);
       else if (csp) policies.set(csp, (policies.get(csp) || []).concat(new URL(l).pathname));
-      if (!h['strict-transport-security']) fail('page-hsts', `${new URL(l).pathname} has no HSTS`);
+      if (!h['strict-transport-security']) pageIssue('no HSTS', pth);
       const ih = inspectHtml(r.text);
       const pols = [...(csp ? csp.split(/,(?=\s*[a-z-]+-src|\s*default-src|\s*frame-ancestors)/i).map(parseCsp) : []), ...ih.metaCsps.map(parseCsp)];
       if (!csp && !ih.metaCsps.length) { /* already reported above */ }
       else {
         const pev = evaluateDoc(ih, pols);
         const own = pev.blockedScripts.filter((sc) => !EDGE_RE.test(sc.body)).length;
-        if (!pev.scriptsGoverned) fail('page-csp', `${new URL(l).pathname}: no policy restricts scripts`);
-        if (own) fail('page-inline', `${new URL(l).pathname}: ${own} inline script(s) blocked by its CSP`);
-        if (pev.styleAttrsBlocked || pev.blockedStyleTags) fail('page-inline-css', `${new URL(l).pathname}: inline styles blocked by style-src`);
+        if (!pev.scriptsGoverned && (csp || ih.metaCsps.length)) pageIssue('CSP present but restricts no scripts', pth);
+        if (own) pageIssue(`inline script(s) blocked by the CSP`, pth);
+        if (pev.styleAttrsBlocked || pev.blockedStyleTags) pageIssue('inline styles blocked by style-src', pth);
       }
-      if (ih.jsonldErrors.length) fail('page-jsonld', `${new URL(l).pathname}: JSON-LD does not parse`);
+      if (ih.jsonldErrors.length) pageIssue('JSON-LD does not parse', pth);
+    }
+    // one line per issue; site-wide when every scanned page has it
+    for (const [issue, paths] of pageIssues) {
+      if (paths.length === scannedPages && scannedPages > 1) fail('page', `all ${scannedPages} sampled inner pages: ${issue} — a site-wide gap, fix it once in _headers / the layout`);
+      else fail('page', `${issue}: ${paths.join(', ')}`);
     }
     if (policies.size > 1) info('page-policies', `${policies.size} distinct CSPs across sampled pages (fine if intentional: docs vs text mirror vs admin)`);
     if (redirected) warn('sitemap-redirects', `${redirected} of ${sample.length} sampled sitemap URL(s) redirect — the sitemap should list the final URLs (trailing slash included); crawlers follow, but it costs a request per page and dilutes canonicals`);

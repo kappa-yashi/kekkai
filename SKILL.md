@@ -79,7 +79,11 @@ file.
    7. CMS surface, if any (PART 6)
    8. repository and docs hygiene (PART 7) — what the repo itself discloses
 
-4. **Verify against the live response, not against intent.** On edge hosts a
+4. **Hand off to senrigan.** The report ends with the `senrigan` command for the
+   same target; run it (or tell the person to): visibility and security are
+   one boundary, and transport findings flow back from senrigan to kekkai.
+
+5. **Verify against the live response, not against intent.** On edge hosts a
    fix that looks obviously correct can silently do nothing. After deploy, run
    the live scan again and confirm the build fingerprint changed.
 
@@ -110,6 +114,7 @@ file.
 | runtime CDN load inside JS | `import()` from unpkg etc.; SRI cannot see it | vendor the helper, patch the loader (PART 6.1) |
 | script writes into CMS folders | re-running it overwrites editors' work | delete one-off importers (PART 6.7) |
 | AI-assistant footprint | `CLAUDE.md` / `.cursorrules` tracked, AI co-author trailers, "built with …" credit — read as "unreviewed, soft target" | git-ignore agent config, drop trailers, no tooling credit in public (PART 7.6) |
+| apex is the primary host | cookies reach every subdomain; apex cannot be a CNAME | make www primary, 301 the apex, canonicals on www |
 | HSTS preload on | one-way door for the whole domain | keep only if it was a decision for this domain |
 | no `version.txt` | "is the new build live?" has no one-request answer | ship a `no-store` fingerprint (PART 3) |
 

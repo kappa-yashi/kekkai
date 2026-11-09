@@ -28,7 +28,8 @@ or clone and run `node bin/kekkai.mjs <target>`.
 
 **Live URL** (read-only GETs)
 
-- http → https 301, apex ↔ www 301 (status codes, not bodies)
+- http → https 301, apex → www 301 (status codes, not bodies); www must be
+  the primary host — apex as primary, or both hosts answering 200, is a warning
 - HSTS (age, includeSubDomains, preload flagged as a decision)
 - Content-Security-Policy: present, single (not two policies on one path),
   `script-src` without `'unsafe-inline'` / `'unsafe-eval'` / wildcards / public
@@ -146,6 +147,17 @@ Exit code 0 = boundary holds, 1 = boundary broken, 2 = usage.
 `astro preview` and `python -m http.server` do not apply `_headers`. The guide
 ships a 20-line `serve.py` that does; scan `http://127.0.0.1:4399` and the
 transport checks are skipped automatically.
+
+## One boundary, two tools
+
+kekkai asks *what does the site give away?* Its twin,
+[senrigan (千里眼)](https://github.com/kappa-yashi/senrigan), asks *what does the
+site fail to tell the machines that should find it?* — titles, canonicals,
+hreflang, sitemap, structured data. A site nobody can find has failed as
+completely as one that was broken into; the breach announces itself, the
+invisibility never does. Every kekkai report ends with the senrigan command
+for the same target, and senrigan hands the transport findings (http, two
+hosts answering, mixed content, apex as primary) back to kekkai.
 
 ## Start a project right: `kekkai init`
 

@@ -88,6 +88,8 @@ property; do not trade it away for a feature.
   it is gone on the live response.
 - A build fingerprint: `version.txt` + `<meta name="build">` from
   `package.json` version and `CF_PAGES_COMMIT_SHA` (or the git short hash).
+- `www` is the primary host; the apex 301s to it (cookie isolation from
+  subdomains, CNAME-able for CDN and failover).
 - Absolute `<link rel="canonical">` on every page; `robots.txt` with no private
   paths; sitemap listing the final URLs (trailing slash included).
 - Every cross-origin resource that cannot be self-hosted carries
@@ -108,6 +110,12 @@ property; do not trade it away for a feature.
   --admin <cms folder> --accept-edge-inline`. Fix in the guide's order
   (headers → CSP → fingerprint → dashboard → leaks → CMS → repo), then read the
   live response again. The live response is the only truth.
+
+## The other half
+
+kekkai asks what the site gives away. Its twin, `senrigan`, asks what the site
+fails to tell search engines and LLMs — titles, canonicals, hreflang,
+sitemap, structured data. Build by both rule sets; run both before release.
 
 ## When a rule and a feature collide
 

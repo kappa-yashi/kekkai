@@ -157,6 +157,16 @@ host loading fonts from the custom domain. In those cases set the font host's
 ACAO to the page's origin, on the font path only. If fonts fall back after a
 header change, check DevTools -> Network -> the font request first.
 
+## www is the primary host
+
+Serve the site on `www.example.com` and 301 the apex to it, not the other way
+round. Two reasons that are security, not taste: a cookie set on the apex is
+sent to **every** subdomain, so a future `staging.`, `cms.` or `api.` inherits
+whatever the public site sets; and an apex cannot be a CNAME, so moving the
+site to another CDN or a failover target needs a provider that flattens
+records. `kekkai` warns when the apex is primary and when both hosts answer
+200. Canonicals stay absolute and point at www.
+
 ## Trap 1.2: _redirects cannot match hostnames
 
 The Pages `_redirects` file matches **paths only**. An apex-to-www redirect is
@@ -938,6 +948,17 @@ credential's shape.
 
 ---
 
+# One boundary, two tools
+
+Everything above is about what the site gives away. Its twin,
+[senrigan (千里眼)](https://github.com/kappa-yashi/senrigan), is about what the
+site fails to tell the machines that should find it: titles, canonicals,
+hreflang, sitemap, structured data. A site nobody can find has failed as
+completely as one that was broken into — the breach announces itself, the
+invisibility never does. Every `kekkai` report ends with the `senrigan`
+command for the same target, and every `senrigan` report hands the transport
+findings (http, two hosts, mixed content, apex as primary) back to `kekkai`.
+
 # Verification checklist
 
 The rule that matters more than any individual item: **verify the packaged
@@ -960,7 +981,7 @@ output and the live response, never your intention.**
 - [ ] Preview-host Access application lists **two** destinations; policy is
       Emails, not "all authenticated users"
 - [ ] The custom domain loads normally in a private window
-- [ ] Apex redirects to www (or the reverse) with a **301**, checked as a status code
+- [ ] Apex redirects to **www** with a **301**, checked as a status code; www is the primary host
 - [ ] Leak audit clean: no source maps, no config files, no stack disclosure, no
       local paths, no forbidden strings, CMS path only in its folder and `_headers`
 - [ ] CMS: self-hosted pinned bundle, own CSP, `no-store` + `noindex` header,

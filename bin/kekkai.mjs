@@ -496,9 +496,13 @@ async function liveScan(input) {
   const other = host.startsWith('www.') ? host.slice(4) : `www.${host}`;
   const o = await get(`https://${other}/`);
   if (o.status === 0) info('alias', `https://${other}/ not reachable (${o.error}) — only one hostname serves the site`);
-  else if (o.status === 301 && new URL(o.headers.location || '/', `https://${other}/`).host === host) pass('alias', `${other} → 301 → ${host}`);
+  else if (o.status === 301 && new URL(o.headers.location || '/', `https://${other}/`).host === host) {
+    if (host.startsWith('www.')) pass('alias', `${other} → 301 → ${host}`);
+    else warn('apex-primary', `${other} → 301 → ${host}: the apex is the primary host. Make www primary instead — cookies set on the apex reach every subdomain (a future staging., cms., api. inherits them), and an apex cannot be a CNAME, so CDN or failover changes need a provider that flattens it. Redirect apex → www with a 301 and keep absolute canonicals on www.`);
+  }
   else if (o.status >= 300 && o.status < 400) warn('alias', `${other} redirects with ${o.status} to ${o.headers.location} — want a 301 to ${host}`);
-  else if (o.status === 200) warn('alias', `https://${other}/ serves the site directly (200) — two hostnames with the same content; redirect one to the other with a 301 (and keep absolute canonicals)`);
+  else if (o.status === 200) warn('alias', `https://${other}/ serves the site directly (200) — two hostnames with the same content; redirect ${host.startsWith('www.') ? other + ' → ' + host : host + ' → ' + other + ' (www as primary)'} with a 301 and keep absolute canonicals`);
+  else if (!host.startsWith('www.') && o.status === 0) warn('apex-primary', `the site lives on the apex and www does not resolve — make www the primary host (cookie isolation from subdomains, CNAME-able for CDN/failover) and 301 the apex to it`);
   else info('alias', `https://${other}/ answers ${o.status}`);
   }
 
@@ -1152,6 +1156,8 @@ for (const r of results) counts[r.level]++;
 const failed = counts.fail > 0 || (opt.strict && counts.warn > 0);
 const mode = isRepo ? 'repository' : isDir ? 'build output' : 'live';
 const again = isRepo ? 'then scan the build and the live site' : 'then run again against the LIVE response';
+const isLive = !isDir;
+const handoff = isLive ? `senrigan (千里眼) reads the other half of the same boundary — what the site fails to tell search engines and LLMs. Same target:\n    npx github:kappa-yashi/senrigan ${target}` : isRepo ? '' : `senrigan (千里眼) reads the other half of the same boundary — titles, canonicals, sitemap, structured data. Same folder:\n    npx github:kappa-yashi/senrigan ${target}`;
 const verdict = failed ? `BOUNDARY BROKEN — fix the ✖ items, ${again}.` : isRepo ? 'BOUNDARY HOLDS — repository clean. Next: scan dist/ and the live site.' : 'BOUNDARY HOLDS — no failures. Re-run after deploy: the live response is the only truth.';
 const plainMark = { pass: '✔', warn: '!', fail: '✖', info: '·' };
 function render(fmt, color) {
@@ -1162,6 +1168,7 @@ function render(fmt, color) {
   if (fmt === 'md') {
     lines.push(`# kekkai (結界) — ${mode} scan of ${target}`, '', `**${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info** — ${verdict}`, '');
     let last = ''; for (const r of shown) { if (r.section !== last) { lines.push('', `## ${r.section}`, ''); last = r.section; } lines.push(`- ${plainMark[r.level]} ${r.msg}${r.detail && r.level !== 'pass' ? `\n  \`${String(r.detail).replace(/\n/g, ' ')}\`` : ''}`); }
+    if (handoff) lines.push('', '## Hand-off', '', handoff.replace(/\n    /, '\n\n```\n') + '\n```');
     return lines.join('\n') + '\n';
   }
   lines.push('', `kekkai (結界) — ${mode} scan of ${target}`, '');
@@ -1171,10 +1178,12 @@ function render(fmt, color) {
     lines.push(`    ${mark[r.level]} ${opt.summary ? `[${r.section}] ` : ''}${r.msg}`);
     if (!opt.summary && r.detail && r.level !== 'pass') for (const l of String(r.detail).split('\n')) lines.push(c(90, `        ${l}`));
   }
-  lines.push('', `  ${c(32, counts.pass + ' pass')}  ${c(33, counts.warn + ' warn')}  ${c(31, counts.fail + ' fail')}  ${c(90, counts.info + ' info')}`, '', `  ${c(failed ? 31 : 32, verdict)}`, '');
+  lines.push('', `  ${c(32, counts.pass + ' pass')}  ${c(33, counts.warn + ' warn')}  ${c(31, counts.fail + ' fail')}  ${c(90, counts.info + ' info')}`, '', `  ${c(failed ? 31 : 32, verdict)}`);
+  if (handoff) lines.push('', c(90, `  Hand-off · ${handoff.split('\n')[0]}`), c(90, `  ${handoff.split('\n')[1].trim()}`));
+  lines.push('');
   return lines.join('\n');
 }
-const jsonOut = () => JSON.stringify({ target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: !failed, results }, null, 2);
+const jsonOut = () => JSON.stringify({ target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: !failed, senrigan: handoff ? `npx github:kappa-yashi/senrigan ${target}` : null, results }, null, 2);
 if (opt.json) console.log(jsonOut()); else console.log(render('text', process.stdout.isTTY));
 if (opt.out) {
   const { writeFileSync } = await import('node:fs');

@@ -44,6 +44,17 @@ prefer the rule; if the feature must win, scope the exception to one
 directive and one origin and say why in the commit message, not in a public
 file.
 
+*Decision gate.* Before adding a dependency (`npm install <pkg>`), choosing
+a CMS, a site builder or any third-party platform, run
+`node bin/kekkai.mjs check <name>[@version] …` and read the answer before
+proposing it: it lists what [pwn.watch](https://pwn.watch) has recorded for
+that name — open incidents, past supply-chain compromises, fixed versions.
+Exit 1 means the version you named is inside an affected range: pick the
+fixed one. A clean answer is "no news", not "safe"; a package with repeated
+supply-chain incidents is a different choice from one with none, even if
+both are clean today. Say in one line what the gate returned when you
+propose the dependency, so the choice is made with the history in view.
+
 **Checking.** The workflow below.
 
 ## Workflow

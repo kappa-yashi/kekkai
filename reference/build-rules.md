@@ -103,6 +103,11 @@ property; do not trade it away for a feature.
 - `.gitignore`: `.env`, `.env.*`, `.dev.vars`, `node_modules/`, `dist/`,
   `.astro/`, `*.local.json`, `.claude/`, `CLAUDE.md`, `CLAUDE.local.md`,
   `AGENTS.md`, `.cursor/`, `.cursorrules`.
+- Before `npm install <pkg>`, before choosing a CMS, a builder or a
+  third-party platform: `kekkai check <name>[@version]`. It answers from the
+  pwn.watch feed — open incidents, past supply-chain compromises, fixed
+  versions. Adopt with the history in view; a clean answer is "no news", not
+  "safe".
 - Dependencies pinned by a lockfile and kept out of known incidents: every
   `kekkai ./repo` run matches the lockfile against the pwn.watch feed
   (patch-now, breach, supply-chain); a ✖ there means upgrade before anything

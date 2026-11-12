@@ -20,6 +20,7 @@ edge: Netlify, etc.). The checks are framework-agnostic.
 npx github:kappa-yashi/kekkai https://www.example.com
 npx github:kappa-yashi/kekkai ./dist
 npx github:kappa-yashi/kekkai ./repo
+npx github:kappa-yashi/kekkai check sharp@0.33.5 "sveltia cms"   # before you adopt it
 ```
 
 or clone and run `node bin/kekkai.mjs <target>`.
@@ -137,6 +138,10 @@ or clone and run `node bin/kekkai.mjs <target>`.
   library paths, the CMS bundle, site builders) are matched against **open**
   incidents; the version is usually not visible, so these are warnings that
   say which version is affected
+- **decision gate**: `kekkai check <name>[@version] …` before `npm install`
+  or before choosing a CMS / builder / platform — what pwn.watch has recorded
+  for that name, open and closed, with fixed versions; exit 1 when the named
+  version is inside an affected range
 - the feed (`incidents.json`, ~1.5 MB) is downloaded once per run with an
   ETag cache in the system temp folder; **nothing about the scanned site is
   sent anywhere**. If pwn.watch is unreachable the cached copy is used, or the

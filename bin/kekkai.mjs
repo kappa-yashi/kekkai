@@ -5,6 +5,7 @@
 //   kekkai https://www.example.com          scan the live site (read-only GETs)
 //   kekkai ./dist                           scan a build output folder (+ its _headers)
 //   kekkai ./repo                           scan a git working copy (secrets, ignored files, docs that describe the security setup)
+//   kekkai check <pkg|product>[@version] …  decision gate: what pwn.watch knows about a dependency or platform before you adopt it
 //   kekkai init [dir] [--admin <cms>]       scaffold scripts/kekkai-postbuild.mjs, .gitignore block, kekkai-rules.md (--force overwrites)
 //
 // Options:
@@ -31,7 +32,7 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '' };
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null };
 const KNOWN_FLAGS = ['--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
@@ -39,6 +40,8 @@ for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith('-') && !KNOWN_FLAGS.includes(a)) { const [guess, score] = similar(a); console.error(`unknown option ${a}${score > 0.6 ? ` — did you mean ${guess}?` : ''}`); process.exit(2); }
   if (a === 'init' && !target) { opt.init = true; continue; }
+  if (a === 'check' && !target && !opt.check) { opt.check = []; continue; }
+  if (opt.check && !a.startsWith('-')) { opt.check.push(a); continue; }
   if (a === '--force') opt.force = true;
   else if (a === '--json') opt.json = true;
   else if (a === '--out') opt.out = argv[++i] || '';
@@ -57,7 +60,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '-h' || a === '--help') { usage(); process.exit(0); }
   else target = a;
 }
-if (!target && !opt.init) { usage(); process.exit(2); }
+if (!target && !opt.init && !opt.check?.length) { usage(); process.exit(2); }
 
 function usage() {
   console.log(`kekkai (結界) — static site boundary & disclosure check
@@ -66,6 +69,7 @@ function usage() {
   kekkai ./dist                       scan a build folder (+ _headers)
   kekkai ./repo                       scan a git working copy (auto-detected by .git)
   kekkai init [dir] [--admin <cms>]   scaffold a project: post-build _headers/version.txt script, .gitignore block, build rules
+  kekkai check <name>[@version] …     before adopting a package or platform: its open and past incidents on pwn.watch
 
   --json  --summary  --out <file.md|.json|.txt>  --strict  --no-probe  --no-history
   --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N
@@ -1302,9 +1306,45 @@ function detectProducts(html, headers = {}, assetPaths = []) {
   return out;
 }
 
+// ───────────────────────────── check (decision gate) ─────────────────────────────
+// `kekkai check sharp@0.33.5 wordpress "sveltia cms"` — the question to ask BEFORE `npm install` or before choosing a platform:
+// what has pwn.watch recorded about it, open or closed. A clean answer means "no news", not "safe" — but a package
+// with two supply-chain incidents in a year is a different choice from one with none.
+async function checkProducts(names) {
+  const data = await loadIncidents();
+  if (!data) { console.log('kekkai check — no incident feed available (network, or --watch-file)'); process.exit(2); }
+  const incidents = (data.incidents || []).filter((i) => !i.isExample);
+  const upd = String(data.updatedAt || data.generatedAt || '').slice(0, 10);
+  console.log(`\nkekkai check — pwn.watch feed of ${upd}, ${incidents.length} incidents\n`);
+  let worst = 0;
+  for (const raw of names) {
+    const at = raw.lastIndexOf('@'); const name = at > 0 ? raw.slice(0, at) : raw; const version = at > 0 ? raw.slice(at + 1) : null;
+    const re = tokenRe(name);
+    const hits = incidents.filter((inc) => re.test(inc.product || '') || (inc.tags || []).some((t) => t.toLowerCase() === name.toLowerCase()) || (inc.affectedVersions || []).some((a) => re.test(a)))
+      .sort((a, b) => Date.parse(b.updatedAt || b.startedAt || 0) - Date.parse(a.updatedAt || a.startedAt || 0));
+    if (!hits.length) { console.log(`  ✔ ${raw} — no incident on record`); continue; }
+    const open = hits.filter((h) => h.status === 'live');
+    const sc = hits.filter((h) => h.category === 'supply-chain');
+    console.log(`  ${open.length ? '!' : '·'} ${raw} — ${hits.length} incident(s): ${open.length} open, ${sc.length} supply-chain, last ${String(hits[0].updatedAt || hits[0].startedAt || '').slice(0, 10)}`);
+    for (const inc of hits.slice(0, 8)) {
+      const clauses = (inc.affectedVersions || []).filter((a) => re.test(a));
+      const groups = parseRanges(clauses.length ? clauses.join('; ') : (inc.affectedVersions || []).join('; '));
+      let mark = ' ';
+      if (version) { if (groups.length && inRanges(version, groups)) { mark = '✖'; worst = Math.max(worst, 2); } else if (!groups.length) { mark = '?'; worst = Math.max(worst, 1); } else mark = '✔'; }
+      else if (inc.status === 'live') worst = Math.max(worst, 1);
+      console.log(`      ${mark} ${String(inc.startedAt || '').slice(0, 10)} [${(inc.severity || '?').toUpperCase()}, ${inc.category}${inc.status === 'live' ? ', OPEN' : ''}] ${inc.title}${(inc.fixedVersions || []).length ? ` — fixed in ${inc.fixedVersions.join('; ')}` : ''}`);
+      console.log(`        ${inc.url || `https://pwn.watch/i/${inc.slug}`}`);
+    }
+    if (hits.length > 8) console.log(`      … ${hits.length - 8} more`);
+  }
+  console.log(`\n  ${worst === 2 ? 'the version you named is inside an affected range — pick the fixed version' : worst === 1 ? 'open or unparsed items above: read them before you adopt this' : 'nothing on record — "no news", not "safe"; pin the version and keep the lockfile in kekkai ./repo'}\n`);
+  process.exit(worst === 2 ? 1 : 0);
+}
+
 // ───────────────────────────── run ─────────────────────────────
 const isDir = !/^https?:\/\//i.test(target) && existsSync(target) && statSync(target).isDirectory();
 if (opt.init) { await initProject(target || '.'); process.exit(0); }
+if (opt.check) { await checkProducts(opt.check); }
 const isRepo = isDir && (opt.mode === 'repo' || (opt.mode !== 'dist' && existsSync(join(target, '.git')) && !existsSync(join(target, '_headers')) && !existsSync(join(target, 'index.html'))));
 let productsForWatch = [];
 if (isRepo) productsForWatch = repoScan(target) || []; else if (isDir) productsForWatch = distScan(target) || []; else productsForWatch = (await liveScan(target)) || [];

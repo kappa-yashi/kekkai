@@ -946,6 +946,38 @@ git grep -nIiE "access polic|one-time pin|client secret|token scope|oauth app" -
 that name account emails or staging hosts, and comments that describe a
 credential's shape.
 
+## 7.8 Known incidents: the lockfile against the news
+
+A static site has no server to patch, but it has a build. The build runs
+every dependency in the lockfile with the same rights as you: it can read the
+deploy token, the CMS token, your `~/.npmrc`. A supply-chain compromise of a
+build-time package (an image library, a CSS tool, a CLI) is therefore a
+compromise of everything the build could reach, even though the shipped HTML
+is unchanged.
+
+[pwn.watch](https://pwn.watch) publishes an incident feed — patch-now
+advisories, breaches, supply-chain compromises — as plain JSON with no
+account and no tracking. `kekkai` downloads that feed and matches it locally:
+
+- **repo mode**: every `name@version` of the lockfile (npm, pnpm, yarn)
+  against the affected ranges. In range → ✖, upgrade before release. Named but
+  the range is prose the tool cannot parse → warning, read the incident.
+- **dist / live mode**: products visible in the output (framework asset
+  paths, generator meta, `Server` header, versioned library URLs, the CMS
+  bundle, a site builder's runtime) against **open** incidents → warning with
+  the fixed version, because the installed version is usually invisible from
+  outside; check it where it is installed.
+
+Nothing about the site is sent to pwn.watch; the feed is cached by ETag in
+the temp folder, and the check degrades to an info line when the network is
+unavailable (`--watch-file` reads a saved feed; `--no-watch` skips).
+
+When a **supply-chain** incident matches, the fixed version is the smaller
+half of the remedy. Assume the compromised build read every secret it could:
+rotate the deploy token, the CMS token and any key in the CI environment,
+then rebuild from a clean install (`rm -rf node_modules && npm ci`) and
+compare the output fingerprint.
+
 ---
 
 # One boundary, two tools

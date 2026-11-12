@@ -103,6 +103,11 @@ property; do not trade it away for a feature.
 - `.gitignore`: `.env`, `.env.*`, `.dev.vars`, `node_modules/`, `dist/`,
   `.astro/`, `*.local.json`, `.claude/`, `CLAUDE.md`, `CLAUDE.local.md`,
   `AGENTS.md`, `.cursor/`, `.cursorrules`.
+- Dependencies pinned by a lockfile and kept out of known incidents: every
+  `kekkai ./repo` run matches the lockfile against the pwn.watch feed
+  (patch-now, breach, supply-chain); a ✖ there means upgrade before anything
+  else ships. After a supply-chain incident, rotate every token the build
+  could have read.
 - Commits authored by the project owner, without assistant trailers;
   production builds from `main` only, through a merge.
 - Before every release: `kekkai ./repo --forbid <other brands, staging hosts>`,

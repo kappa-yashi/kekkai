@@ -16,6 +16,8 @@
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
 //   --accept-edge-inline  live: an inline script injected by the CDN (Cloudflare JS detections) is reported as info, not failure
+//   --no-watch          skip the known-incident check (no request to pwn.watch)
+//   --watch-file <f>    use a saved incidents.json instead of fetching (offline / CI)
 //   --out <file>        also write the report to a file (.json → JSON, .md → markdown, else plain text)
 //   --summary           print only warnings and failures, one line each, plus the counts
 //   --repo | --dist     force the mode for a folder (default: .git without index.html/_headers → repo, otherwise dist)
@@ -29,8 +31,8 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false };
-const KNOWN_FLAGS = ['--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '' };
+const KNOWN_FLAGS = ['--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
@@ -45,6 +47,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--no-probe') opt.probe = false;
   else if (a === '--no-history') opt.history = false;
   else if (a === '--accept-edge-inline') opt.acceptEdge = true;
+  else if (a === '--no-watch') opt.watch = false;
+  else if (a === '--watch-file') opt.watchFile = argv[++i] || '';
   else if (a === '--repo') opt.mode = 'repo';
   else if (a === '--dist') opt.mode = 'dist';
   else if (a === '--admin') opt.admin = argv[++i] || '';
@@ -64,7 +68,8 @@ function usage() {
   kekkai init [dir] [--admin <cms>]   scaffold a project: post-build _headers/version.txt script, .gitignore block, build rules
 
   --json  --summary  --out <file.md|.json|.txt>  --strict  --no-probe  --no-history
-  --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N`);
+  --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N
+  --no-watch  --watch-file <incidents.json>`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -723,6 +728,7 @@ async function liveScan(input) {
     if (!scannedPages) info('pages', `no inner page could be scanned (${sample.length} sampled)`);
     else if (results.filter((r) => r.section === 'Inner pages' && r.level === 'fail').length === 0) pass('pages', `${scannedPages} inner page(s): CSP + HSTS present, inline code consistent`);
   }
+  return detectProducts(doc.text, doc.headers, assetUrls.map((u) => u.pathname));
 }
 
 function svgFileChecks(svg, label) {
@@ -927,6 +933,9 @@ function distScan(dir) {
     if (totals.gen) warn('generator', `<meta name="generator"> on ${totals.gen} page(s) — stack disclosure`); else pass('generator', 'no generator meta');
   }
   if (g > 1) info('groups', `${g} distinct header profiles across the HTML files (fine when intentional: documents / text mirror / admin)`);
+  // products visible in the output, for the known-incident check
+  const distProducts = [];
+  for (const f of files.filter((f) => /\.html?$/.test(f.rel)).slice(0, 50)) for (const pr of detectProducts(read(f), {}, files.map((x) => x.rel))) if (!distProducts.some((p) => p.name === pr.name)) distProducts.push(pr);
   // svg files
   const svgs = files.filter((f) => f.rel.endsWith('.svg'));
   let svgBad = 0;
@@ -969,6 +978,7 @@ function distScan(dir) {
   const vt = files.find((f) => f.rel === '/version.txt');
   if (vt) { const h = effectiveHeaders('/version.txt', rules); info('version', `/version.txt present (${/no-store/i.test(h['cache-control'] || '') ? 'no-store' : 'CACHEABLE — add Cache-Control: no-store'})`); }
   else info('version', 'no /version.txt build fingerprint — add one so "is the new build live?" has a one-request answer');
+  return distProducts;
 }
 
 // ───────────────────────────── repo mode ─────────────────────────────
@@ -1106,6 +1116,7 @@ function repoScan(dir) {
   }
   const remote = (git(dir, ['remote', 'get-url', 'origin']) || '').trim();
   if (remote) { section('Repository'); info('remote', `origin: ${remote.replace(/\/\/[^@]+@/, '//***@')}${/github\.com/.test(remote) ? ' — if the site has a CMS or drafts, this repo must be private; check forks = 0 before any history rewrite' : ''}`); }
+  return readDependencies(dir);
 }
 
 // ───────────────────────────── init ─────────────────────────────
@@ -1170,11 +1181,134 @@ ${buildNote ? buildNote + '\n' : ''}  3. Give kekkai-rules.md to whoever writes 
 `);
 }
 
+// ───────────────────────────── known incidents (pwn.watch) ─────────────────────────────
+// pwn.watch publishes security incidents (patch-now, breaches, supply chain) as static JSON with CORS and ETag.
+// kekkai downloads the whole file and matches LOCALLY: nothing about the scanned site is sent anywhere.
+const WATCH_URL = 'https://pwn.watch/incidents.json';
+async function loadIncidents() {
+  if (!opt.watch) return null;
+  const { tmpdir } = await import('node:os');
+  const { writeFileSync } = await import('node:fs');
+  if (opt.watchFile) { try { return JSON.parse(readFileSync(opt.watchFile, 'utf8')); } catch (e) { info('watch', `cannot read ${opt.watchFile}: ${e.message}`); return null; } }
+  const cachePath = join(tmpdir(), 'kekkai-pwnwatch.json');
+  let cached = null; try { cached = JSON.parse(readFileSync(cachePath, 'utf8')); } catch { /* none */ }
+  try {
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 20000);
+    const headers = { 'user-agent': UA, accept: 'application/json' };
+    if (cached?.etag) headers['if-none-match'] = cached.etag;
+    const r = await fetch(WATCH_URL, { headers, signal: ctl.signal }); clearTimeout(t);
+    if (r.status === 304 && cached) return cached.data;
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    try { writeFileSync(cachePath, JSON.stringify({ etag: r.headers.get('etag'), fetchedAt: Date.now(), data })); } catch { /* cache is optional */ }
+    return data;
+  } catch (e) {
+    if (cached) { info('watch', `pwn.watch unreachable (${e.cause?.code || e.message}); using the cached copy from ${new Date(cached.fetchedAt).toISOString().slice(0, 10)}`); return cached.data; }
+    info('watch', `pwn.watch unreachable (${e.cause?.code || e.message}) — known-incident check skipped (--no-watch silences this)`);
+    return null;
+  }
+}
+// Minimal semver-ish compare: numeric dotted parts, then prerelease (a release beats its prereleases).
+function verParts(v) { const m = String(v).trim().replace(/^v/i, '').match(/^(\d+(?:\.\d+)*)(?:[-+]?([0-9A-Za-z.-]+))?/); if (!m) return null; return { nums: m[1].split('.').map(Number), pre: m[2] || '' }; }
+function verCmp(a, b) {
+  const A = verParts(a), B = verParts(b); if (!A || !B) return NaN;
+  for (let i = 0; i < Math.max(A.nums.length, B.nums.length); i++) { const d = (A.nums[i] || 0) - (B.nums[i] || 0); if (d) return d; }
+  if (A.pre === B.pre) return 0; if (!A.pre) return 1; if (!B.pre) return -1; return A.pre < B.pre ? -1 : 1;
+}
+// Pull comparator groups out of a free-text clause: ">= 1.4.0, < 1.7.16", "before 2.23.0", "2.0.0 to 2.22.0", "<= 15.5.27", "3.7.7+".
+function parseRanges(text) {
+  const t = text.replace(/\band\b/gi, ';');
+  const groups = [];
+  for (const clause of t.split(/;|\(|\)/)) {
+    const cmps = [];
+    for (const m of clause.matchAll(/(>=|<=|<|>|==?)\s*v?(\d+(?:\.\d+)+(?:[-.][0-9A-Za-z.]+)?)/g)) cmps.push([m[1] === '=' || m[1] === '==' ? '=' : m[1], m[2]]);
+    for (const m of clause.matchAll(/\b(?:before|prior to|earlier than|below|up to but not including)\s+v?(\d+(?:\.\d+)+[\w.-]*)/gi)) cmps.push(['<', m[1]]);
+    for (const m of clause.matchAll(/\bv?(\d+(?:\.\d+)+[\w.-]*)\s+(?:to|through|-)\s+v?(\d+(?:\.\d+)+[\w.-]*)/gi)) { cmps.push(['>=', m[1]]); cmps.push(['<=', m[2]]); }
+    for (const m of clause.matchAll(/\b(?:all versions|every version)\s+(?:of\s+)?[^\d]*(\d+\.x)/gi)) { const maj = m[1].split('.')[0]; cmps.push(['>=', `${maj}.0.0`]); cmps.push(['<', `${Number(maj) + 1}.0.0`]); }
+    if (cmps.length) groups.push(cmps);
+  }
+  return groups;
+}
+function inRanges(version, groups) {
+  for (const g of groups) {
+    const ok = g.every(([op, v]) => { const c = verCmp(version, v); if (Number.isNaN(c)) return false; return op === '<' ? c < 0 : op === '<=' ? c <= 0 : op === '>' ? c > 0 : op === '>=' ? c >= 0 : c === 0; });
+    if (ok) return true;
+  }
+  return false;
+}
+const tokenRe = (name) => new RegExp(`(^|[^A-Za-z0-9@/._-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9._-])`, 'i');
+// products: [{ name, version|null, where }] — name is an npm package or a platform/product keyword.
+function matchIncidents(data, products, label) {
+  const incidents = data?.incidents || [];
+  if (!incidents.length || !products.length) return;
+  const seen = new Set(); let fails = 0, warns = 0;
+  const recent = (inc) => (Date.now() - Date.parse(inc.updatedAt || inc.startedAt || 0)) < 400 * 86400e3;
+  for (const pr of products) {
+    const re = tokenRe(pr.name);
+    for (const inc of incidents) {
+      if (inc.isExample) continue;
+      const hay = `${inc.product || ''}\n${(inc.tags || []).join(' ')}\n${(inc.affectedVersions || []).join('\n')}`;
+      const nameHit = re.test(inc.product || '') || (inc.tags || []).some((t) => t.toLowerCase() === pr.name.toLowerCase()) || (inc.affectedVersions || []).some((a) => re.test(a));
+      if (!nameHit) continue;
+      const key = `${pr.name}|${inc.slug}`; if (seen.has(key)) continue; seen.add(key);
+      const link = inc.url || `https://pwn.watch/i/${inc.slug}`;
+      const sev = (inc.severity || 'unknown').toUpperCase();
+      const fixed = (inc.fixedVersions || []).join('; ');
+      if (pr.version) {
+        // only the affected clauses that name this package (or the product line when none names a package)
+        const clauses = (inc.affectedVersions || []).filter((a) => re.test(a));
+        const groups = parseRanges(clauses.length ? clauses.join('; ') : (inc.affectedVersions || []).join('; '));
+        if (groups.length && inRanges(pr.version, groups)) { fails++; fail('incident', `${pr.name}@${pr.version} is in the affected range of "${inc.title}" [${sev}, ${inc.category}${inc.status === 'live' ? ', live' : ''}]${fixed ? ` — fixed in ${fixed}` : ''} · ${link}`); }
+        else if (!groups.length && (inc.status === 'live' || inc.category === 'supply-chain') && recent(inc)) { warns++; warn('incident', `${pr.name}@${pr.version}: "${inc.title}" [${sev}, ${inc.category}] names this package but the affected versions could not be parsed (${(inc.affectedVersions || []).join(' | ').slice(0, 120)}) — verify by hand · ${link}`); }
+      } else if (inc.status === 'live' && recent(inc)) {
+        warns++; warn('incident', `${pr.name} (version not visible${pr.where ? `, seen in ${pr.where}` : ''}): open incident "${inc.title}" [${sev}, ${inc.category}]${fixed ? ` — fixed in ${fixed}` : ''}; check which version runs · ${link}`);
+      }
+    }
+  }
+  if (!fails && !warns) pass('incidents', `${label} matched against ${incidents.length} incidents (updated ${String(data.updatedAt || data.generatedAt || '').slice(0, 10)}): nothing open or affected`);
+}
+// Dependencies from package.json + lockfile (npm v2/v3, pnpm, yarn classic/berry — best effort).
+function readDependencies(dir) {
+  const out = new Map();
+  const add = (n, v) => { if (n && v && !out.has(n)) out.set(n, String(v).replace(/^[\^~>=<\s]+/, '')); };
+  const pl = join(dir, 'package-lock.json');
+  if (existsSync(pl)) { try { const j = JSON.parse(readFileSync(pl, 'utf8')); for (const [k, v] of Object.entries(j.packages || {})) { if (!k) continue; add(k.replace(/^.*node_modules\//, ''), v.version); } for (const [k, v] of Object.entries(j.dependencies || {})) add(k, v.version); } catch { /* ignore */ } }
+  const pn = join(dir, 'pnpm-lock.yaml');
+  if (existsSync(pn)) { for (const m of readFileSync(pn, 'utf8').matchAll(/^\s{2}['"]?(@?[^'"\s:@]+(?:\/[^'"\s:@]+)?)@([0-9][^'"\s:(]*)/gm)) add(m[1], m[2]); }
+  const yl = join(dir, 'yarn.lock');
+  if (existsSync(yl)) { for (const m of readFileSync(yl, 'utf8').matchAll(/^"?(@?[^@"\s]+)@[^\n]*\n\s+version:?\s+"?([0-9][^"\s]*)/gm)) add(m[1], m[2]); }
+  const pj = join(dir, 'package.json');
+  if (existsSync(pj)) { try { const j = JSON.parse(readFileSync(pj, 'utf8')); for (const sec of ['dependencies', 'devDependencies']) for (const [k, v] of Object.entries(j[sec] || {})) if (/^\d/.test(String(v).replace(/^[\^~]/, ''))) add(k, v); } catch { /* ignore */ } }
+  return [...out].map(([name, version]) => ({ name, version, where: 'lockfile' }));
+}
+// Products visible in a response / document: platform, server, CMS bundle, well-known libraries with versions in their URLs.
+function detectProducts(html, headers = {}, assetPaths = []) {
+  const out = []; const add = (name, version, where) => { if (!out.some((p) => p.name === name)) out.push({ name, version: version || null, where }); };
+  const gen = html.match(/<meta[^>]+name\s*=\s*["']generator["'][^>]*content\s*=\s*["']([^"']+)["']/i)?.[1] || html.match(/<meta[^>]+content\s*=\s*["']([^"']+)["'][^>]*name\s*=\s*["']generator["']/i)?.[1];
+  if (gen) { const m = gen.match(/^([A-Za-z][\w .-]*?)\s*v?(\d+(?:\.\d+)+)?/); if (m) add(m[1].trim().toLowerCase().replace(/\s+/g, ' '), m[2] || null, 'generator meta'); }
+  for (const h of ['server', 'x-powered-by', 'x-generator']) { const v = headers[h]; if (!v) continue; const m = String(v).match(/^([A-Za-z][\w.-]*)(?:\/(\d+(?:\.\d+)+))?/); if (m && !/^cloudflare$/i.test(m[1])) add(m[1].toLowerCase(), m[2] || null, `${h} header`); }
+  const all = [html, ...assetPaths].join('\n');
+  if (/wp-content\/|wp-includes\//.test(all)) add('wordpress', all.match(/wp-includes\/[^"']*\?ver=(\d+(?:\.\d+)+)/)?.[1] || null, 'wp-includes paths');
+  for (const m of all.matchAll(/\/(jquery|bootstrap|lodash|moment|swiper|gsap|three|alpine(?:js)?|htmx|vue|react|angular|leaflet|chart)[.-]?(?:min\.)?(?:js)?[-@.]?v?(\d+(?:\.\d+)+)?/gi)) add(m[1].toLowerCase(), m[2] || null, 'script path');
+  if (/sveltia-cms/i.test(all)) add('sveltia cms', all.match(/sveltia-cms[^"']*?v?(\d+\.\d+\.\d+)/i)?.[1] || null, 'cms bundle');
+  if (/decap-cms|netlify-cms/i.test(all)) add('decap cms', null, 'cms bundle');
+  if (/\/_astro\//.test(all)) add('astro', null, '/_astro/ assets');
+  if (/\/_next\//.test(all)) add('next.js', null, '/_next/ assets');
+  if (/\/_nuxt\//.test(all)) add('nuxt', null, '/_nuxt/ assets');
+  if (/webflow\.js|data-wf-site/i.test(all)) add('webflow', null, 'runtime');
+  if (/static\.wixstatic\.com|wix-code/i.test(all)) add('wix', null, 'runtime');
+  if (/cdn\.shopify\.com|Shopify\.theme/i.test(all)) add('shopify', null, 'runtime');
+  if (/builderassets\.com|hotelwize/i.test(all)) add('hotelwize', null, 'runtime');
+  return out;
+}
+
 // ───────────────────────────── run ─────────────────────────────
 const isDir = !/^https?:\/\//i.test(target) && existsSync(target) && statSync(target).isDirectory();
 if (opt.init) { await initProject(target || '.'); process.exit(0); }
 const isRepo = isDir && (opt.mode === 'repo' || (opt.mode !== 'dist' && existsSync(join(target, '.git')) && !existsSync(join(target, '_headers')) && !existsSync(join(target, 'index.html'))));
-if (isRepo) repoScan(target); else if (isDir) distScan(target); else await liveScan(target);
+let productsForWatch = [];
+if (isRepo) productsForWatch = repoScan(target) || []; else if (isDir) productsForWatch = distScan(target) || []; else productsForWatch = (await liveScan(target)) || [];
+if (opt.watch && productsForWatch.length) { section('Known incidents (pwn.watch)'); const data = await loadIncidents(); if (data) matchIncidents(data, productsForWatch, isRepo ? `${productsForWatch.length} dependencies` : `${productsForWatch.length} detected product(s)`); }
 
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
 for (const r of results) counts[r.level]++;

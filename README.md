@@ -124,6 +124,25 @@ or clone and run `node bin/kekkai.mjs <target>`.
 - `--forbid` hits in history reported per string with file count and the last
   commit that touched them
 
+**Known incidents** (every mode, via [pwn.watch](https://pwn.watch))
+
+- repo: every `name@version` from `package-lock.json` / `pnpm-lock.yaml` /
+  `yarn.lock` (and pinned entries of `package.json`) is matched against the
+  pwn.watch incident feed — patch-now advisories, breaches, supply-chain
+  compromises. A version inside an affected range is a failure; an incident
+  that names the package but whose affected range cannot be parsed is a
+  warning to verify by hand
+- dist / live: products visible in the output (generator meta, `Server` /
+  `X-Powered-By`, `/_astro/`, `/_next/`, `wp-includes/…?ver=`, versioned
+  library paths, the CMS bundle, site builders) are matched against **open**
+  incidents; the version is usually not visible, so these are warnings that
+  say which version is affected
+- the feed (`incidents.json`, ~1.5 MB) is downloaded once per run with an
+  ETag cache in the system temp folder; **nothing about the scanned site is
+  sent anywhere**. If pwn.watch is unreachable the cached copy is used, or the
+  check is skipped with an info line. `--no-watch` disables it, `--watch-file`
+  reads a saved feed (offline machines, CI, tests)
+
 ## Options
 
 ```
@@ -138,6 +157,8 @@ or clone and run `node bin/kekkai.mjs <target>`.
 --repo | --dist     force the mode for a folder
 --admin <folder>    dist: the CMS/admin folder name
 --forbid a,b,c      strings that must not appear in the output
+--no-watch          skip the known-incident check (no request to pwn.watch)
+--watch-file <f>    match against a saved incidents.json instead of fetching (offline / CI)
 ```
 
 Exit code 0 = boundary holds, 1 = boundary broken, 2 = usage.

@@ -980,6 +980,66 @@ compare the output fingerprint.
 
 ---
 
+# PART 8 — Platform profiles: when the static site has a backend
+
+A static storefront is only half a shop. The other half is an API with a
+database, sessions and an admin — exactly the server-side surface this guide
+told you to avoid, now unavoidable. kekkai keeps its static-site scope and
+adds a *profile* for the backend it recognises, so the boundary is checked
+end to end. The first profile is **Medusa** (medusajs.com); a custom commerce
+backend built on Medusa inherits every Medusa issue and fix, so it gets the
+same checks.
+
+## 8.1 Medusa: what the backend gives away
+
+- **Secrets in the config.** `medusa-config` reads `jwtSecret` and
+  `cookieSecret` from the environment and falls back to `supersecret` in
+  development; production refuses to start without them. The failure mode is
+  the fallback people add to make the start-up error go away:
+  `process.env.JWT_SECRET || "supersecret"`. That line turns "crash without a
+  secret" into "run on a secret that is in the repo". Delete the fallback;
+  the crash is the feature.
+- **CORS.** `storeCors`, `adminCors`, `authCors` accept origins and regexes.
+  A pattern like `/http:\/\/.+/` allows every origin — with credentials. The
+  live test is one request with an unknown `Origin`: if it comes back in
+  `Access-Control-Allow-Origin`, any page on the internet can drive the API
+  as a logged-in user.
+- **Admin surface.** The dashboard is served from the API host at
+  `admin.path` (default `/app`); the Admin API lives at `/admin/*`. The API
+  must answer 401 without a session or secret key; the dashboard should not
+  be reachable from the open internet at all — Cloudflare Access or an IP
+  allowlist in front, or `admin.disable` and a separate private deploy.
+- **Keys.** The storefront uses a *publishable* key (`pk_…`, header
+  `x-publishable-api-key`) — public by design, it only scopes sales channels.
+  A *secret* key (`sk_…`) is an admin user: it belongs on a server, never in
+  a bundle, never in a template file. kekkai treats `sk_` in any public
+  output as a credential leak.
+- **Custom routes.** Files under `src/api/admin/**` are authenticated by the
+  framework; `src/api/store/**` is public by design; anything else
+  (`src/api/webhooks/…`, `src/api/custom/…`) is whatever
+  `src/api/middlewares` says — and by default it says nothing.
+- **Disclosure.** `X-Powered-By: Express`, a `Server` header with a version,
+  a stack trace in an error body, a browsable `/static/` upload directory,
+  `/.env` or `/medusa-config.js` answered by a misconfigured proxy.
+
+## 8.2 Medusa: the checks, per mode
+
+| mode | what kekkai does |
+|---|---|
+| `kekkai ./repo` | finds `medusa-config.*`: fallback / literal secrets (✖), catch-all CORS (✖), literal `databaseUrl` with password (✖), `rejectUnauthorized: false` (!), admin not disabled (·), mixed `@medusajs/*` versions (!), custom route groups without middleware (!), `.env.template` with real-looking values (✖); `@medusajs/*` versions go to the known-incident check as "medusa" |
+| `kekkai https://api.shop` | detects the Store API (`/store/regions` → 400 "publishable key required", or a regions list); then publishable-key enforcement, `/admin/users` → 401, `/app` dashboard, CORS reflection on store/admin/auth, HSTS / nosniff / `X-Powered-By` / `Server`, probes, stack traces. No document checks, no senrigan hand-off |
+| `kekkai https://www.shop` or `./dist` | storefront bundle: `sk_` key (✖), local / staging / internal backend URL baked in (✖), backend host listed (·); `--backend <url>` runs the backend checks in the same pass |
+
+## 8.3 Keeping up with Medusa
+
+A custom build on Medusa is not a fork, so upstream fixes arrive through
+`npm`, and so do upstream incidents. `kekkai check @medusajs/medusa` before an
+upgrade, `kekkai ./repo` after, and the weekly watch (tenni) in between. Keep
+every `@medusajs/*` package on the same version; a mismatch is the most
+common source of "it worked yesterday".
+
+---
+
 # One boundary, two tools
 
 Everything above is about what the site gives away. Its twin,

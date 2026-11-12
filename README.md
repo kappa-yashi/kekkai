@@ -148,6 +148,31 @@ or clone and run `node bin/kekkai.mjs <target>`.
   check is skipped with an info line. `--no-watch` disables it, `--watch-file`
   reads a saved feed (offline machines, CI, tests)
 
+**Platform profile: Medusa** (auto-detected; `--platform medusa` forces it)
+
+kekkai is for static sites, but a static storefront often sits on a
+[Medusa](https://medusajs.com) backend — or on a custom commerce backend
+built on it, which inherits every Medusa issue and fix. The profile adds:
+
+- repo: `medusa-config.*` — hard-coded or fallback `jwtSecret` /
+  `cookieSecret` (`|| "supersecret"`), catch-all CORS patterns, literal
+  `databaseUrl` with a password, `rejectUnauthorized: false`, admin dashboard
+  not disabled on the API host, `@medusajs/*` packages at mixed versions,
+  custom API route groups outside `/store` `/admin` `/auth` with no
+  middleware entry, `.env.template` files carrying real-looking values
+- live, when the target answers like a Medusa Store API: publishable-key
+  enforcement on `/store/*`, `/admin/*` closed (401), dashboard reachable at
+  `/app`, CORS reflection of an unknown origin on store / admin / auth routes,
+  `X-Powered-By`, HSTS and nosniff on the API, `.env` / `medusa-config` /
+  upload-directory probes, stack traces in error bodies. The generic document
+  checks are skipped for a JSON API; no senrigan hand-off
+- storefront (live or build folder): a Medusa secret key (`sk_…`) in client
+  code (fail), a local / staging / internal backend URL baked into the bundle
+  (fail), the backend host listed so you scan it too (`--backend <url>` runs
+  the backend checks in the same pass)
+- `@medusajs/*` versions feed the known-incident check under the product
+  name "medusa" (scoped packages match their product alias)
+
 ## Options
 
 ```
@@ -163,6 +188,8 @@ or clone and run `node bin/kekkai.mjs <target>`.
 --admin <folder>    dist: the CMS/admin folder name
 --forbid a,b,c      strings that must not appear in the output
 --no-watch          skip the known-incident check (no request to pwn.watch)
+--platform medusa   force the Medusa profile (auto-detected otherwise)
+--backend <url>     storefront scan: also run the Medusa backend checks against this API host
 --watch-file <f>    match against a saved incidents.json instead of fetching (offline / CI)
 ```
 

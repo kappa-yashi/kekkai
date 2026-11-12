@@ -24,6 +24,11 @@ Two questions, opposite answers:
 - Static output on an edge host (Cloudflare Pages, Netlify, or similar) with
   headers set through a `_headers` file or the host dashboard.
 - Astro is the reference stack; the checks are framework-agnostic.
+- Platform profiles extend the scope where a static storefront depends on a
+  backend: **Medusa** (auto-detected in repo, live and build output; `--platform
+  medusa`, `--backend <api-url>`). A custom commerce backend built on Medusa
+  gets the same checks, and its `@medusajs/*` versions feed the known-incident
+  check.
 - Only scan sites you own or are allowed to test. The live scan is read-only
   GETs, but a handful of them probe well-known leak paths.
 
@@ -108,6 +113,10 @@ propose the dependency, so the choice is made with the history in view.
 | inline script not allowed by CSP | the browser blocks it (Strategy B) or a hash is stale (Strategy A); a trailing newline changes the hash | move it to a bundled/external file, or regenerate hashes on every build |
 | dependency in an affected range (pwn.watch) | a known patch-now / supply-chain incident covers the installed version | upgrade to the fixed version, rebuild, re-run; for a supply-chain incident rotate anything the build could reach |
 | open incident for a detected product (warning) | the live site runs a product with an open incident; version not visible | check the installed version against the incident page, upgrade if affected |
+| Medusa: secret fallback or literal in `medusa-config` | the app runs on a secret that is in the repo | read it from the environment, drop the `\|\| "…"` fallback, rotate |
+| Medusa: CORS reflects an unknown origin | a catch-all pattern in storeCors / adminCors / authCors | list exact origins; re-test live with an unknown Origin header |
+| Medusa: `/admin/*` answers 200 unauthenticated, or `sk_` key in client code | the Admin API is open | revoke the key, restore authentication, rotate |
+| Medusa: dashboard at `/app` on the public API host | the login form is one request away for anyone | access layer in front (Cloudflare Access / IP allowlist) or `admin.disable` + a private deploy |
 | edge-injected inline script (warning) | the CDN added it; per-request token, cannot be hashed; the CSP blocks it | turn the CDN feature off, or accept it (`--accept-edge-inline`) |
 | `style=""` but `style-src 'self'` | styles are silently dropped | data attributes + CSS, or CSSOM from an allowed script |
 | `Access-Control-Allow-Origin: *` | any site's JS may read your responses | remove it (`! Access-Control-Allow-Origin` on Pages) or set your own origin; **verify live**, the removal is not always honoured |

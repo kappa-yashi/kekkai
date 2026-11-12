@@ -121,6 +121,23 @@ property; do not trade it away for a feature.
   (headers → CSP → fingerprint → dashboard → leaks → CMS → repo), then read the
   live response again. The live response is the only truth.
 
+## When the static site has a backend (Medusa)
+
+- `medusa-config`: every secret from the environment, **no** `\|\| "fallback"`;
+  CORS lists with exact origins (never `/http.*/` or `*`); `databaseUrl`
+  from the environment; `rejectUnauthorized` left unset unless the DB
+  provider requires otherwise.
+- Admin dashboard either disabled on the API host (`admin.disable`) and
+  deployed privately, or behind an access layer; never on the storefront's
+  origin.
+- Custom route groups outside `/store`, `/admin`, `/auth` get an explicit
+  entry in `src/api/middlewares` (`authenticate()` or a written "public"
+  decision).
+- Storefront builds carry the production `NEXT_PUBLIC_MEDUSA_BACKEND_URL` and
+  only the `pk_` publishable key; an `sk_` key never reaches a bundle.
+- All `@medusajs/*` packages on one version; `kekkai check @medusajs/medusa`
+  before upgrading; `kekkai ./repo` after.
+
 ## The other half
 
 kekkai asks what the site gives away. Its twin, `senrigan`, asks what the site

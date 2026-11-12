@@ -17,6 +17,8 @@
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
 //   --accept-edge-inline  live: an inline script injected by the CDN (Cloudflare JS detections) is reported as info, not failure
+//   --platform medusa   force the Medusa profile (auto-detected: medusa-config.* in a repo, /store API on a live host)
+//   --backend <url>     storefront scan: also run the Medusa backend checks against this API host
 //   --no-watch          skip the known-incident check (no request to pwn.watch)
 //   --watch-file <f>    use a saved incidents.json instead of fetching (offline / CI)
 //   --out <file>        also write the report to a file (.json → JSON, .md → markdown, else plain text)
@@ -32,8 +34,8 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null };
-const KNOWN_FLAGS = ['--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '' };
+const KNOWN_FLAGS = ['--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
@@ -51,6 +53,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--no-history') opt.history = false;
   else if (a === '--accept-edge-inline') opt.acceptEdge = true;
   else if (a === '--no-watch') opt.watch = false;
+  else if (a === '--platform') opt.platform = (argv[++i] || '').toLowerCase();
+  else if (a === '--backend') opt.backend = argv[++i] || '';
   else if (a === '--watch-file') opt.watchFile = argv[++i] || '';
   else if (a === '--repo') opt.mode = 'repo';
   else if (a === '--dist') opt.mode = 'dist';
@@ -73,7 +77,8 @@ function usage() {
 
   --json  --summary  --out <file.md|.json|.txt>  --strict  --no-probe  --no-history
   --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N
-  --no-watch  --watch-file <incidents.json>`);
+  --no-watch  --watch-file <incidents.json>
+  --platform medusa  --backend <api-url>   (platform profile: Medusa backend + storefront)`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -179,6 +184,8 @@ const SECRET_PATTERNS = [
   ['npm token', /\bnpm_[A-Za-z0-9]{36}\b/],
   ['OpenAI-style key', /\bsk-[A-Za-z0-9_-]{32,}\b/],
   ['Cloudflare API token shape', /\b(?:cf|cloudflare)[_-]?(?:api[_-]?)?token\s*[:=]\s*["']?[A-Za-z0-9_-]{40}\b/i],
+  ['connection string with password', /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqp):\/\/[^\s:\/]+:[^\s@\/]{4,}@[^\s\/]+/i, (m) => !/:(?:password|pass|secret|xxx+|\*+|<[^>]+>|\$\{[^}]+\}|\[[^\]]+\])@/i.test(m[0])],
+  ['Medusa secret API key', /\bsk_[0-9a-f]{32,}\b/],
   ['JWT', /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/],
   ['assignment of a secret', /\b(?:api[_-]?key|secret|password|passwd|client_secret|access[_-]?token|auth[_-]?token|private[_-]?key)["']?\s*[:=]\s*["']([^"'\s]{16,})["']/i, (m) => looksLikeCredential(m[1])],
 ];
@@ -479,10 +486,10 @@ function checkSri(doc, baseOrigin, label) {
 
 // ───────────────────────────── live mode ─────────────────────────────
 const UA = 'kekkai/1.0 (+static site boundary check; read-only)';
-async function get(url, { redirect = 'manual', method = 'GET' } = {}) {
+async function get(url, { redirect = 'manual', method = 'GET', headers: extra = {} } = {}) {
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);
   try {
-    const r = await fetch(url, { method, redirect, headers: { 'user-agent': UA, 'accept': '*/*', 'cache-control': 'no-cache' }, signal: ctl.signal });
+    const r = await fetch(url, { method, redirect, headers: { 'user-agent': UA, 'accept': '*/*', 'cache-control': 'no-cache', ...extra }, signal: ctl.signal });
     const buf = Buffer.from(await r.arrayBuffer());
     return { status: r.status, headers: lower(Object.fromEntries(r.headers.entries())), body: buf, text: buf.toString('utf8'), url };
   } catch (e) { return { status: 0, headers: {}, body: Buffer.alloc(0), text: '', url, error: e.cause?.code || e.name || String(e) }; }
@@ -587,7 +594,8 @@ async function liveScan(input) {
   // disclosure: the document, every fetched same-origin JS/CSS, and the usual version/changelog routes
   section('Disclosure');
   let discl = checkDisclosureText(doc.text, 'document', { html: true });
-  for (const au of assetUrls) { const a = await get(au.href); if (a.status === 200 && !/\.(woff2?|ttf|otf)$/i.test(au.pathname)) discl += checkDisclosureText(a.text, au.pathname); }
+  const assetTexts = [];
+  for (const au of assetUrls) { const a = await get(au.href); if (a.status === 200 && !/\.(woff2?|ttf|otf)$/i.test(au.pathname)) { discl += checkDisclosureText(a.text, au.pathname); if (/\.m?js$/i.test(au.pathname)) assetTexts.push(a.text); } }
   for (const p of ['version', 'version.txt', 'changelog', 'changelog.txt', 'CHANGELOG.md', 'release-notes', 'humans.txt']) {
     const r = await get(`${origin}/${p}`); if (r.status !== 200) continue;
     discl += checkDisclosureText(r.text, `/${p}`, { html: /html/i.test(r.headers['content-type'] || '') });
@@ -732,7 +740,12 @@ async function liveScan(input) {
     if (!scannedPages) info('pages', `no inner page could be scanned (${sample.length} sampled)`);
     else if (results.filter((r) => r.section === 'Inner pages' && r.level === 'fail').length === 0) pass('pages', `${scannedPages} inner page(s): CSP + HSTS present, inline code consistent`);
   }
-  return detectProducts(doc.text, doc.headers, assetUrls.map((u) => u.pathname));
+  const products = detectProducts(doc.text, doc.headers, assetUrls.map((u) => u.pathname));
+  const backendHosts = medusaStorefrontFindings([doc.text, ...assetTexts], 'live');
+  if (backendHosts) products.push({ name: 'medusa', version: null, where: 'storefront bundle' });
+  const backend = opt.backend || (backendHosts || []).find((h) => h.endsWith(host.replace(/^www\./, '')));
+  if (backend) products.push(...await medusaBackendScan(/^https?:/.test(backend) ? backend : `https://${backend}`));
+  return products;
 }
 
 function svgFileChecks(svg, label) {
@@ -939,6 +952,7 @@ function distScan(dir) {
   if (g > 1) info('groups', `${g} distinct header profiles across the HTML files (fine when intentional: documents / text mirror / admin)`);
   // products visible in the output, for the known-incident check
   const distProducts = [];
+  { const texts = files.filter((f) => /\.(?:html?|m?js)$/.test(f.rel) && !/\.map$/.test(f.rel)).slice(0, 400).map((f) => read(f)); if (medusaStorefrontFindings(texts, 'build output')) distProducts.push({ name: 'medusa', version: null, where: 'storefront bundle' }); }
   for (const f of files.filter((f) => /\.html?$/.test(f.rel)).slice(0, 50)) for (const pr of detectProducts(read(f), {}, files.map((x) => x.rel))) if (!distProducts.some((p) => p.name === pr.name)) distProducts.push(pr);
   // svg files
   const svgs = files.filter((f) => f.rel.endsWith('.svg'));
@@ -1120,6 +1134,7 @@ function repoScan(dir) {
   }
   const remote = (git(dir, ['remote', 'get-url', 'origin']) || '').trim();
   if (remote) { section('Repository'); info('remote', `origin: ${remote.replace(/\/\/[^@]+@/, '//***@')}${/github\.com/.test(remote) ? ' — if the site has a CMS or drafts, this repo must be private; check forks = 0 before any history rewrite' : ''}`); }
+  medusaRepoFindings(dir, tracked);
   return readDependencies(dir);
 }
 
@@ -1240,6 +1255,15 @@ function inRanges(version, groups) {
   }
   return false;
 }
+// scoped packages also match their product name: @medusajs/medusa → medusa, @sveltia/cms → sveltia cms, @astrojs/* → astro
+const PRODUCT_ALIASES = { '@medusajs/': 'medusa', '@sveltia/': 'sveltia cms', 'decap-cms': 'decap cms', '@astrojs/': 'astro', 'next': 'next.js', '@nuxt/': 'nuxt', '@sveltejs/kit': 'sveltekit', '@shopify/': 'shopify', '@sentry/': 'sentry', '@strapi/': 'strapi', '@payloadcms/': 'payload' };
+function aliasRe(name) {
+  const names = [name];
+  for (const [k, v] of Object.entries(PRODUCT_ALIASES)) if (name === k || (k.endsWith('/') && name.startsWith(k))) names.push(v);
+  if (/^@[^/]+\//.test(name)) names.push(name.split('/')[1]);
+  const alts = [...new Set(names)].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return new RegExp(`(^|[^A-Za-z0-9@/._-])(?:${alts})(?![A-Za-z0-9._-])`, 'i');
+}
 const tokenRe = (name) => new RegExp(`(^|[^A-Za-z0-9@/._-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9._-])`, 'i');
 // products: [{ name, version|null, where }] — name is an npm package or a platform/product keyword.
 function matchIncidents(data, products, label) {
@@ -1248,7 +1272,7 @@ function matchIncidents(data, products, label) {
   const seen = new Set(); let fails = 0, warns = 0;
   const recent = (inc) => (Date.now() - Date.parse(inc.updatedAt || inc.startedAt || 0)) < 400 * 86400e3;
   for (const pr of products) {
-    const re = tokenRe(pr.name);
+    const re = aliasRe(pr.name);
     for (const inc of incidents) {
       if (inc.isExample) continue;
       const hay = `${inc.product || ''}\n${(inc.tags || []).join(' ')}\n${(inc.affectedVersions || []).join('\n')}`;
@@ -1306,6 +1330,152 @@ function detectProducts(html, headers = {}, assetPaths = []) {
   return out;
 }
 
+// ───────────────────────────── platform profile: Medusa ─────────────────────────────
+// Medusa (medusajs.com) is a Node commerce backend (Express, Postgres) with a Store API (/store/*, publishable key),
+// an Admin API (/admin/*, session or secret key) and an admin dashboard (default /app), usually paired with a Next.js
+// storefront that embeds NEXT_PUBLIC_MEDUSA_BACKEND_URL + a pk_ publishable key. A custom build on top of Medusa
+// inherits every Medusa issue and fix, so the profile also feeds the known-incident check with the @medusajs/* versions.
+const MEDUSA_PROBE_ORIGIN = 'https://kekkai-cors-probe.invalid';
+let apiTarget = false; // set when the live target is an API backend: no senrigan hand-off, no document checks
+function isJson(r) { return /json/i.test(r.headers['content-type'] || ''); }
+async function detectMedusaBackend(origin) {
+  const r = await get(`${origin}/store/regions`);
+  if (r.status === 400 && isJson(r) && /publishable/i.test(r.text)) return 'v2';
+  if (r.status === 200 && isJson(r) && /"regions"\s*:/.test(r.text)) return 'open';
+  return null;
+}
+async function medusaBackendScan(input, { hint = null } = {}) {
+  const origin = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`).origin;
+  section('Medusa backend');
+  info('platform', `Medusa backend profile on ${origin} — Store API, Admin API, dashboard, CORS, disclosure (the generic document checks do not apply to a JSON API)`);
+  const kind = hint || await detectMedusaBackend(origin);
+  if (!kind) { fail('detect', `${origin}/store/regions does not answer like a Medusa Store API (expected 400 "publishable key required" or a JSON regions list)`); return [{ name: 'medusa', version: null, where: 'profile' }]; }
+  // transport
+  const localApi = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(origin);
+  if (!/^https:/.test(origin)) { if (localApi) info('https', 'local address — https not checked'); else fail('https', 'the API is served over http — tokens and carts travel in clear'); }
+  apiTarget = true;
+  const health = await get(`${origin}/health`);
+  if (health.status === 200) pass('health', '/health answers 200'); else info('health', `/health answers ${health.status}`);
+  // store API: publishable key enforcement
+  if (kind === 'v2') pass('store-key', 'Store API refuses requests without x-publishable-api-key (sales-channel scoping enforced)');
+  else warn('store-key', 'Store API answers without a publishable key — every product, region and price is listable by anyone; on Medusa v2 the key is enforced, so this is either v1 or a custom change: restore the enforcement');
+  // admin API must be closed
+  const adm = await get(`${origin}/admin/users`);
+  if (adm.status === 401) pass('admin-api', '/admin/* refuses unauthenticated requests (401)');
+  else if (adm.status === 200) fail('admin-api', `/admin/users answers 200 without authentication — the Admin API is open`);
+  else info('admin-api', `/admin/users answers ${adm.status}`);
+  const admHdr = lower(adm.headers);
+  // dashboard exposure
+  const app = await get(`${origin}/app`, { redirect: 'follow' });
+  if (app.status === 200 && /<html/i.test(app.text)) warn('dashboard', `the admin dashboard is served from the public API host (${origin}/app) — anyone can reach the login form: put the path behind an access layer (Cloudflare Access, IP allowlist) or build the admin separately (admin.disable + a private deploy); if you changed admin.path, kekkai cannot see it and that is fine`);
+  else pass('dashboard', `/app is not an open dashboard (${app.status})`);
+  // CORS: reflected or wildcard origins
+  for (const [path, label] of [['/store/regions', 'storeCors'], ['/admin/users', 'adminCors'], ['/auth/customer/emailpass', 'authCors']]) {
+    const r = await get(`${origin}${path}`, { headers: { origin: MEDUSA_PROBE_ORIGIN, 'access-control-request-method': 'GET' }, method: 'OPTIONS' });
+    const acao = r.headers['access-control-allow-origin'];
+    if (acao === MEDUSA_PROBE_ORIGIN) fail('cors', `${label}: an unknown origin is reflected in Access-Control-Allow-Origin on ${path} (credentials ${r.headers['access-control-allow-credentials'] || 'not set'}) — the CORS list contains a catch-all pattern (e.g. /http.*/ or *); list the exact storefront and admin origins`);
+    else if (acao === '*') warn('cors', `${label}: Access-Control-Allow-Origin: * on ${path} — browsers will not send credentials to it, but any page can read public responses; list exact origins`);
+    else pass('cors', `${label}: unknown origins are not allowed on ${path}`);
+  }
+  // headers on the API
+  const h = lower(health.headers);
+  if (h['x-powered-by']) warn('powered', `X-Powered-By: ${h['x-powered-by']} on the API — stack disclosure (Express default); disable it at the proxy or in the app`);
+  if (!h['strict-transport-security']) warn('hsts', 'no Strict-Transport-Security on the API host');
+  if (!/nosniff/i.test(h['x-content-type-options'] || '')) warn('nosniff', 'no X-Content-Type-Options: nosniff on the API');
+  if (/\d/.test(h.server || '')) warn('server', `Server header discloses a version: ${h.server}`);
+  // disclosure probes specific to a Medusa deploy
+  if (opt.probe) {
+    let hits = 0;
+    for (const p of ['.env', 'medusa-config.js', 'medusa-config.ts', 'package.json', '.git/HEAD', 'static/', 'uploads/']) {
+      const r = await get(`${origin}/${p}`);
+      if (r.status !== 200) continue;
+      if (/^(static|uploads)\/$/.test(p)) { if (/<title>Index of|<a href="\.\.?\/?">|Directory listing/i.test(r.text)) { hits++; fail('probe', `/${p} lists its contents — product media and anything else uploaded is browsable`); } continue; }
+      if (/json/i.test(r.headers['content-type'] || '') && /"message"/.test(r.text)) continue; // Medusa's JSON 404-ish answers
+      hits++; fail('probe', `/${p} is served (200, ${r.headers['content-type'] || 'unknown type'}, ${r.body.length} bytes)`);
+    }
+    if (!hits) pass('probe', 'config, env, git and upload-directory probes all refused');
+  }
+  const err = health.text + adm.text;
+  const stack = /\bat\s+\S+\s+\((?:\/|[A-Z]:\\)[^)]+:\d+:\d+\)/.test(err);
+  if (stack) fail('stack', 'an error response contains a stack trace with server paths — set NODE_ENV=production and a generic error handler');
+  return [{ name: 'medusa', version: null, where: 'Store API' }, { name: 'express', version: null, where: 'framework' }];
+}
+// Storefront side: what a Medusa storefront bundle gives away.
+function medusaStorefrontFindings(texts, label) {
+  const all = texts.join('\n');
+  const backend = [...all.matchAll(/https?:\/\/[^\s"'`<>)]+/g)].map((m) => m[0]).filter((u) => /medusa|:9000\b|\/store\/|api\./i.test(u) && !/medusajs\.com|docs\./i.test(u));
+  const pk = (all.match(/\bpk_[0-9a-f]{32,}\b/g) || []).length;
+  const sk = (all.match(/\bsk_[0-9a-f]{32,}\b/g) || []).length;
+  const isMedusa = /x-publishable-api-key|NEXT_PUBLIC_MEDUSA|medusa\.config|@medusajs/i.test(all) || pk > 0;
+  if (!isMedusa) return null;
+  section('Medusa storefront');
+  info('platform', `${label}: Medusa storefront bundle detected (publishable key header / Medusa SDK)`);
+  if (sk) fail('secret-key', `a Medusa secret API key (sk_…) is inside client-side code — it grants Admin API access as the user that created it: revoke it now, create a new one, keep it server-side only`);
+  else pass('secret-key', 'no Medusa secret key (sk_) in client code' + (pk ? ` — the pk_ publishable key is public by design` : ''));
+  const hosts = [...new Set(backend.map((u) => { try { return new URL(u).host; } catch { return null; } }).filter(Boolean))];
+  if (hosts.length) {
+    const bad = hosts.filter((h) => /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|$)/.test(h) || STAGING_RE.test(h) || /\.(?:internal|local|lan)(:|$)/.test(h));
+    STAGING_RE.lastIndex = 0;
+    if (bad.length) fail('backend-url', `the storefront points at a local, staging or internal backend: ${bad.join(', ')} — the build embedded a dev value of NEXT_PUBLIC_MEDUSA_BACKEND_URL`);
+    else info('backend-url', `backend host(s) referenced by the storefront: ${hosts.slice(0, 3).join(', ')} — scan it too: kekkai https://${hosts[0]} (or --backend)`);
+  }
+  return hosts.filter((h) => !/^(localhost|127\.)/.test(h));
+}
+// Repo side: a Medusa project (or a custom commerce backend built on it).
+function medusaRepoFindings(dir, tracked) {
+  const cfg = tracked.filter((f) => /(^|\/)medusa-config\.(?:[cm]?js|ts)$/.test(f));
+  let pj = null; try { pj = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')); } catch { /* none */ }
+  const deps = { ...(pj?.dependencies || {}), ...(pj?.devDependencies || {}) };
+  const medusaPkgs = Object.keys(deps).filter((k) => /^@medusajs\//.test(k));
+  if (!cfg.length && !medusaPkgs.length && opt.platform !== 'medusa') return false;
+  section('Medusa project');
+  info('platform', `Medusa profile: ${cfg.length ? cfg.join(', ') : 'no medusa-config file'}; ${medusaPkgs.length} @medusajs/* package(s)`);
+  for (const f of cfg) {
+    let t; try { t = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    const code = t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    // fallback or literal secrets
+    const fb = [...code.matchAll(/\b(jwtSecret|cookieSecret|JWT_SECRET|COOKIE_SECRET)\b[^\n]*?\|\|\s*(["'`])([^"'`\n]+)\2/g)].map((m) => `${m[1]} || "${m[3].slice(0, 12)}${m[3].length > 12 ? '…' : ''}"`);
+    if (fb.length) fail('secret-fallback', `${f}: a secret has a hard-coded fallback (${fb.join('; ')}) — in production the app must crash without JWT_SECRET / COOKIE_SECRET, not run on a value that is in the repo; drop the fallback`);
+    const lit = [...code.matchAll(/\b(jwtSecret|cookieSecret)\s*:\s*(["'`])([^"'`\n]+)\2/g)];
+    if (lit.length) fail('secret-literal', `${f}: ${lit.map((m) => m[1]).join(', ')} set to a literal string — it is a public secret the moment the repo is shared; read it from the environment and rotate`);
+    if (!fb.length && !lit.length) pass('secrets', `${f}: no hard-coded or fallback secrets`);
+    // CORS values
+    const cors = [...code.matchAll(/\b(storeCors|adminCors|authCors|store_cors|admin_cors|auth_cors)\b\s*:\s*([^\n,]+)/g)];
+    for (const m of cors) {
+      const v = m[2];
+      if (/\/https?[^\n,]*\.[*+]/.test(v) || /["'`]\*["'`]/.test(v) || /\(\?:\.\*\)|\.\*\//.test(v)) fail('cors', `${f}: ${m[1]} contains a catch-all (${v.trim().slice(0, 50)}) — any origin can call the API with credentials`);
+      else if (/localhost|127\.0\.0\.1/.test(v) && !/process\.env|import\.meta\.env/.test(v)) warn('cors', `${f}: ${m[1]} is a literal with localhost (${v.trim().slice(0, 50)}) — fine in dev, set it from the environment so production carries the real origins`);
+    }
+    if (!cors.length) info('cors', `${f}: no CORS values in the config (set through the environment, or a custom layer)`);
+    if (/rejectUnauthorized\s*:\s*false/.test(code)) warn('db-ssl', `${f}: database SSL with rejectUnauthorized: false — the DB connection accepts any certificate`);
+    if (/databaseUrl\s*:\s*["'`][^"'`]*:\/\/[^"'`]*:[^"'`@]+@/.test(code)) fail('db-url', `${f}: databaseUrl is a literal with a password — rotate the DB user and read it from the environment`);
+    if (!/admin\s*:\s*\{[^}]*disable/.test(code)) info('admin', `${f}: admin dashboard not disabled — it is served from the API host at admin.path (default /app); decide: access layer in front, or a separate private deploy with admin.disable`);
+    if (/workerMode\s*:\s*["'`]shared["'`]/.test(code) || !/workerMode/.test(code)) info('worker', `${f}: workerMode shared (default) — fine for one instance; split server/worker when scaling, so background jobs are not on the public process`);
+  }
+  // package versions
+  const vers = [...new Set(medusaPkgs.map((k) => deps[k]))];
+  if (vers.length > 1) warn('versions', `@medusajs/* packages at different versions (${vers.join(', ')}) — Medusa expects every core package on the same version; mismatches surface as odd runtime errors`);
+  else if (medusaPkgs.length) pass('versions', `${medusaPkgs.length} @medusajs/* package(s) on ${vers[0]}`);
+  // custom routes outside the protected groups
+  const routeFiles = tracked.filter((f) => /^src\/api\/.+\/route\.[tj]s$/.test(f));
+  const custom = [...new Set(routeFiles.map((f) => f.split('/')[2]).filter((g) => !['store', 'admin', 'auth'].includes(g)))];
+  const mw = tracked.find((f) => /^src\/api\/middlewares\.[tj]s$/.test(f));
+  let mwText = ''; if (mw) { try { mwText = readFileSync(join(dir, mw), 'utf8'); } catch { /* none */ } }
+  if (custom.length) {
+    const unguarded = custom.filter((g) => !new RegExp(`/${g}[/*"'\`]`).test(mwText) || !/authenticate\(/.test(mwText));
+    if (unguarded.length) warn('custom-routes', `custom API route group(s) outside /store, /admin, /auth: /${unguarded.join(', /')} — nothing protects them by default; add authenticate() (or an explicit "public" decision) in src/api/middlewares`);
+    else pass('custom-routes', `custom route group(s) /${custom.join(', /')} have middleware entries`);
+  }
+  // env templates with real-looking values
+  for (const f of tracked.filter((f) => /(^|\/)\.env\.(?:template|example|sample)$/.test(f))) {
+    let t; try { t = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    const real = [...t.matchAll(/^(JWT_SECRET|COOKIE_SECRET|DATABASE_URL|REDIS_URL|[A-Z_]*(?:SECRET|TOKEN|KEY|PASSWORD))\s*=\s*(.+)$/gm)].filter((m) => looksLikeCredential(m[2].trim().replace(/^["']|["']$/g, '')) && !/^(?:supersecret|secret|changeme|your[-_]|<|\$\{|xxx)/i.test(m[2].trim()));
+    if (real.length) fail('env-template', `${f}: ${real.map((m) => m[1]).join(', ')} carry real-looking values — templates hold placeholders only; rotate these`);
+  }
+  // store-side secret pattern check is in the generic pass (sk_ keys)
+  return true;
+}
+
 // ───────────────────────────── check (decision gate) ─────────────────────────────
 // `kekkai check sharp@0.33.5 wordpress "sveltia cms"` — the question to ask BEFORE `npm install` or before choosing a platform:
 // what has pwn.watch recorded about it, open or closed. A clean answer means "no news", not "safe" — but a package
@@ -1319,7 +1489,7 @@ async function checkProducts(names) {
   let worst = 0;
   for (const raw of names) {
     const at = raw.lastIndexOf('@'); const name = at > 0 ? raw.slice(0, at) : raw; const version = at > 0 ? raw.slice(at + 1) : null;
-    const re = tokenRe(name);
+    const re = aliasRe(name);
     const hits = incidents.filter((inc) => re.test(inc.product || '') || (inc.tags || []).some((t) => t.toLowerCase() === name.toLowerCase()) || (inc.affectedVersions || []).some((a) => re.test(a)))
       .sort((a, b) => Date.parse(b.updatedAt || b.startedAt || 0) - Date.parse(a.updatedAt || a.startedAt || 0));
     if (!hits.length) { console.log(`  ✔ ${raw} — no incident on record`); continue; }
@@ -1347,7 +1517,9 @@ if (opt.init) { await initProject(target || '.'); process.exit(0); }
 if (opt.check) { await checkProducts(opt.check); }
 const isRepo = isDir && (opt.mode === 'repo' || (opt.mode !== 'dist' && existsSync(join(target, '.git')) && !existsSync(join(target, '_headers')) && !existsSync(join(target, 'index.html'))));
 let productsForWatch = [];
-if (isRepo) productsForWatch = repoScan(target) || []; else if (isDir) productsForWatch = distScan(target) || []; else productsForWatch = (await liveScan(target)) || [];
+let medusaKind = null;
+if (!isDir) { const o = new URL(/^https?:\/\//i.test(target) ? target : `https://${target}`).origin; medusaKind = opt.platform === 'medusa' ? (await detectMedusaBackend(o)) || 'forced' : await detectMedusaBackend(o); }
+if (isRepo) productsForWatch = repoScan(target) || []; else if (isDir) productsForWatch = distScan(target) || []; else if (medusaKind) productsForWatch = await medusaBackendScan(target, { hint: medusaKind === 'forced' ? null : medusaKind }); else productsForWatch = (await liveScan(target)) || [];
 if (opt.watch && productsForWatch.length) { section('Known incidents (pwn.watch)'); const data = await loadIncidents(); if (data) matchIncidents(data, productsForWatch, isRepo ? `${productsForWatch.length} dependencies` : `${productsForWatch.length} detected product(s)`); }
 
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
@@ -1356,7 +1528,7 @@ const failed = counts.fail > 0 || (opt.strict && counts.warn > 0);
 const mode = isRepo ? 'repository' : isDir ? 'build output' : 'live';
 const again = isRepo ? 'then scan the build and the live site' : 'then run again against the LIVE response';
 const isLive = !isDir;
-const handoff = isLive ? `senrigan (千里眼) reads the other half of the same boundary — what the site fails to tell search engines and LLMs. Same target:\n    npx github:kappa-yashi/senrigan ${target}` : isRepo ? '' : `senrigan (千里眼) reads the other half of the same boundary — titles, canonicals, sitemap, structured data. Same folder:\n    npx github:kappa-yashi/senrigan ${target}`;
+const handoff = apiTarget ? '' : isLive ? `senrigan (千里眼) reads the other half of the same boundary — what the site fails to tell search engines and LLMs. Same target:\n    npx github:kappa-yashi/senrigan ${target}` : isRepo ? '' : `senrigan (千里眼) reads the other half of the same boundary — titles, canonicals, sitemap, structured data. Same folder:\n    npx github:kappa-yashi/senrigan ${target}`;
 const verdict = failed ? `BOUNDARY BROKEN — fix the ✖ items, ${again}.` : isRepo ? 'BOUNDARY HOLDS — repository clean. Next: scan dist/ and the live site.' : 'BOUNDARY HOLDS — no failures. Re-run after deploy: the live response is the only truth.';
 const plainMark = { pass: '✔', warn: '!', fail: '✖', info: '·' };
 function render(fmt, color) {

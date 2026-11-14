@@ -17,6 +17,7 @@
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
 //   --accept-edge-inline  live: an inline script injected by the CDN (Cloudflare JS detections) is reported as info, not failure
+//   --version           print the version; every scan also checks GitHub for a newer release (one request, cached a day; --no-update-check skips)
 //   --origin <ip|host>  live, behind Cloudflare: check the origin server directly (certificate valid for Full (strict)? reachable around Cloudflare?)
 //   --private           repo mode: the origin is a private repository (docs/AI-footprint findings become info; detected with gh when installed)
 //   --platform medusa|shopify   force a platform profile (auto-detected: medusa-config.* in a repo, /store API on a live host)
@@ -33,11 +34,13 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, extname, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+const VERSION = (() => { try { return JSON.parse(readFileSync(join(fileURLToPath(new URL('.', import.meta.url)), '..', 'package.json'), 'utf8')).version; } catch { return '0.0.0'; } })();
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '', private: false, origin: '' };
-const KNOWN_FLAGS = ['--origin', '--private', '--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '', private: false, origin: '', updateCheck: true };
+const KNOWN_FLAGS = ['--version', '-v', '--no-update-check', '--origin', '--private', '--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
@@ -56,6 +59,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--accept-edge-inline') opt.acceptEdge = true;
   else if (a === '--no-watch') opt.watch = false;
   else if (a === '--private') opt.private = true;
+  else if (a === '--version' || a === '-v') { console.log(`kekkai ${VERSION}`); process.exit(0); }
+  else if (a === '--no-update-check') opt.updateCheck = false;
   else if (a === '--origin') opt.origin = argv[++i] || '';
   else if (a === '--platform') opt.platform = (argv[++i] || '').toLowerCase();
   else if (a === '--backend') opt.backend = argv[++i] || '';
@@ -621,7 +626,7 @@ function checkSri(doc, baseOrigin, label) {
 }
 
 // ───────────────────────────── live mode ─────────────────────────────
-const UA = 'kekkai/1.0 (+static site boundary check; read-only)';
+const UA = `kekkai/${VERSION} (+static site boundary check; read-only)`;
 async function get(url, { redirect = 'manual', method = 'GET', headers: extra = {} } = {}) {
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);
   try {
@@ -1842,6 +1847,26 @@ async function checkProducts(names) {
   process.exit(worst === 2 ? 1 : 0);
 }
 
+// ───────────────────────────── update check ─────────────────────────────
+// One request to GitHub for the newest tag, cached for a day in the temp folder. Nothing about the scanned site is sent.
+async function latestVersion() {
+  if (!opt.updateCheck) return null;
+  const { tmpdir } = await import('node:os'); const { writeFileSync } = await import('node:fs');
+  const cachePath = join(tmpdir(), 'kekkai-latest.json');
+  try { const c = JSON.parse(readFileSync(cachePath, 'utf8')); if (Date.now() - c.at < 86400e3 && c.v) return c.v; } catch { /* none */ }
+  try {
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 4000);
+    const r = await fetch('https://api.github.com/repos/kappa-yashi/kekkai/tags?per_page=20', { headers: { 'user-agent': UA, accept: 'application/vnd.github+json' }, signal: ctl.signal }); clearTimeout(t);
+    if (!r.ok) return null;
+    const tags = (await r.json()).map((x) => String(x.name || '').replace(/^v/, '')).filter((v) => /^\d+\.\d+\.\d+$/.test(v));
+    const v = tags.sort((a, b) => verCmp(b, a))[0] || null;
+    if (v) try { writeFileSync(cachePath, JSON.stringify({ at: Date.now(), v })); } catch { /* optional */ }
+    return v;
+  } catch { return null; }
+}
+const latestPromise = latestVersion();
+let updateMsg = '';
+
 // ───────────────────────────── run ─────────────────────────────
 const isDir = !/^https?:\/\//i.test(target) && existsSync(target) && statSync(target).isDirectory();
 if (opt.init) { await initProject(target || '.'); process.exit(0); }
@@ -1853,6 +1878,8 @@ if (!isDir) { const o = new URL(/^https?:\/\//i.test(target) ? target : `https:/
 if (isRepo) productsForWatch = repoScan(target) || []; else if (isDir) productsForWatch = distScan(target) || []; else if (medusaKind) productsForWatch = await medusaBackendScan(target, { hint: medusaKind === 'forced' ? null : medusaKind }); else productsForWatch = (await liveScan(target)) || [];
 if (opt.watch && productsForWatch.length) { section('Known incidents (pwn.watch)'); const data = await loadIncidents(); if (data) matchIncidents(data, productsForWatch, isRepo ? `${productsForWatch.length} dependencies` : `${productsForWatch.length} detected product(s)`); }
 
+const latest = await latestPromise;
+if (latest && verCmp(latest, VERSION) > 0) updateMsg = `kekkai ${latest} is out — this is ${VERSION}. Update before trusting the report: npx --yes clear-npx-cache (npx) · git pull (a clone) · replace the installed skill folder (Claude skill)`;
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
 for (const r of results) counts[r.level]++;
 const failed = counts.fail > 0 || (opt.strict && counts.warn > 0);
@@ -1868,12 +1895,13 @@ function render(fmt, color) {
   const shown = opt.summary ? results.filter((r) => r.level === 'fail' || r.level === 'warn') : results;
   const lines = [];
   if (fmt === 'md') {
-    lines.push(`# kekkai (結界) — ${mode} scan of ${target}`, '', `**${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info** — ${verdict}`, '');
+    lines.push(`# kekkai (結界) ${VERSION} — ${mode} scan of ${target}`, '', ...(updateMsg ? [`> ! ${updateMsg}`, ''] : []), `**${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info** — ${verdict}`, '');
     let last = ''; for (const r of shown) { if (r.section !== last) { lines.push('', `## ${r.section}`, ''); last = r.section; } lines.push(`- ${plainMark[r.level]} ${r.msg}${r.detail && r.level !== 'pass' ? `\n  \`${String(r.detail).replace(/\n/g, ' ')}\`` : ''}`); }
     if (handoff) lines.push('', '## Hand-off', '', handoff.replace(/\n    /, '\n\n```\n') + '\n```');
     return lines.join('\n') + '\n';
   }
-  lines.push('', `kekkai (結界) — ${mode} scan of ${target}`, '');
+  lines.push('', `kekkai (結界) ${VERSION} — ${mode} scan of ${target}`, '');
+  if (updateMsg) lines.push(c(33, `  ! ${updateMsg}`), '');
   let last = '';
   for (const r of shown) {
     if (!opt.summary && r.section !== last) { lines.push(c(1, `  ${r.section}`)); last = r.section; }
@@ -1885,7 +1913,7 @@ function render(fmt, color) {
   lines.push('');
   return lines.join('\n');
 }
-const jsonOut = () => JSON.stringify({ target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: !failed, senrigan: handoff ? `npx github:kappa-yashi/senrigan ${target}` : null, results }, null, 2);
+const jsonOut = () => JSON.stringify({ kekkai: VERSION, latest: latest || null, target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: !failed, senrigan: handoff ? `npx github:kappa-yashi/senrigan ${target}` : null, results }, null, 2);
 if (opt.json) console.log(jsonOut()); else console.log(render('text', process.stdout.isTTY));
 if (opt.out) {
   const { writeFileSync } = await import('node:fs');

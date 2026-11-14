@@ -280,6 +280,7 @@ profile adds:
 --forbid a,b,c      strings that must not appear in the output
 --no-watch          skip the known-incident check (no request to pwn.watch)
 --platform medusa|shopify   force a platform profile (auto-detected otherwise)
+--version           print the version (every scan also checks GitHub for a newer release, once a day; --no-update-check skips it)
 --origin <ip|host>  live, behind Cloudflare: check the origin directly (Full (strict) ready? reachable around Cloudflare?)
 --private           repo: the origin is private (docs / AI-footprint findings become info)
 --backend <url>     storefront scan: also run the Medusa backend checks against this API host

@@ -75,6 +75,20 @@ propose the dependency, so the choice is made with the history in view.
 
 ## Workflow
 
+0. **Be current — before the first scan of a session.** kekkai changes
+   often, and the copy installed with this skill may be behind.
+   - Use the newest code, not the bundled copy: `git clone --depth 1
+     https://github.com/kappa-yashi/kekkai <scratch>/kekkai` (or `git -C
+     <that clone> pull --ff-only`) and run its `bin/kekkai.mjs`; or
+     `npx --yes clear-npx-cache` then `npx github:kappa-yashi/kekkai <target>`.
+   - Compare `node bin/kekkai.mjs --version` of the installed skill with the
+     fresh clone. If the installed one is older, say so in one line ("the
+     installed kekkai skill is X, current is Y — replace the skill folder")
+     and, for this run, follow the fresh clone's `SKILL.md` and `reference/`.
+   - Every report starts with the version that ran, and with a warning line
+     when GitHub has a newer release. If that line appears, update first.
+   - No network: run what is there and state which version ran.
+
 1. **Run the scanner.** It needs Node 18+ and nothing else.
 
    ```bash

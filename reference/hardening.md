@@ -1038,6 +1038,77 @@ upgrade, `kekkai ./repo` after, and the weekly watch (tenni) in between. Keep
 every `@medusajs/*` package on the same version; a mismatch is the most
 common source of "it worked yesterday".
 
+## 8.4 Astro SSR on Workers + headless Shopify
+
+The second profile. The site is no longer a folder of files: Astro runs with
+`output: 'server'` on Cloudflare Workers, renders most pages on request, and
+talks to Shopify (Storefront API for the catalogue and cart, Admin API for
+staff tools, webhooks for orders). The static guide still applies to the
+prerendered pages and assets; what follows is the part a static site never
+had.
+
+**Headers from one source.** `_headers` covers only what the asset server
+returns. Every response the Worker renders gets its headers from the
+middleware. Keep one module that defines the policy and feed both from it;
+two hand-written copies drift by the second release.
+
+**Tokens stay in the Worker.** Shopify issues a public Storefront token (made
+for browsers, rate-limited per buyer IP) and a private one (server-only,
+wider limits). If the Worker makes every call, the browser needs neither:
+declare the private token in Astro's env schema as `context: "server",
+access: "secret"`, store it as a Worker secret, and forward the visitor's IP
+with `Shopify-Storefront-Buyer-IP`, or every buyer shares the Worker's
+budget. The Admin API token for staff tools: the same, with the fewest scopes
+that work. `PUBLIC_*` variables and wrangler `vars` are readable in the bundle
+and the repo — never for tokens.
+
+**Custom domains only.** With `workers_dev` and `preview_urls` left on, the
+same Worker also answers on `*.workers.dev` and on per-version preview URLs —
+hosts your WAF, Access policies and redirects do not cover. Switch both off.
+
+**Staff tools: the edge is not enough.** Cloudflare Access in front of
+`/tools` is the right door, but if it is the only one, a changed or broken
+Access rule (a hostname change at launch, a policy edited for something else)
+opens the tools to everyone. The middleware should refuse — 403 — any request
+to those paths that does not carry a valid `Cf-Access-Jwt-Assertion`:
+signature against the team's public keys, `aud` of the application, expiry.
+A local preview that answers the staff route with 200 is the test.
+
+**Webhooks.** POST only. Verify `X-Shopify-Hmac-Sha256` — HMAC-SHA256 of the
+raw body, base64 — with a constant-time comparison (`crypto.subtle.verify`)
+before parsing anything; answer 401 without it. Shopify retries and may
+deliver the same event twice: dedupe on `X-Shopify-Webhook-Id` before side
+effects. Limit the body size; keep personal data out of logs.
+
+**Checkout.** The checkout lives on Shopify's domain. With `form-action
+'self'`, a form that posts there is blocked by the browser; the Worker
+creates the cart and answers with a 302 to the checkout URL. That keeps
+`form-action` tight and the token on the server.
+
+**The twin storefront.** Every store also lives at
+`<handle>.myshopify.com` with the online-store theme. Left open, it is a
+second shop with your products — a duplicate for search engines and a
+softer target. Password-protect it or redirect it to the domain.
+
+**API versions.** Shopify supports a stable API version for about a year;
+after that, requests are answered by the oldest supported version, and
+breaking changes arrive without a deploy. Pin the version in one place and
+bump it on a schedule.
+
+**What the public files say.** robots.txt should not name staff, tool,
+version or preview paths — the server sends `X-Robots-Tag: noindex` on them
+already. HTML comments in layouts become part of every page; use the
+framework's comments. A public changelog that mentions the CRM, the webhook
+and the Admin API is a map; publish a build id and a date.
+
+## 8.5 Astro SSR + Shopify: the checks, per mode
+
+| mode | what kekkai does |
+|---|---|
+| `kekkai ./repo` | wrangler `workers_dev` / `preview_urls` (!), secrets in `vars` (✖), tokens declared client/public in the env schema or read via `PUBLIC_*` (✖ for admin/private/secret names, ! otherwise), staff routes without a JWT check in the middleware (!), webhooks: no signature (✖), no constant-time compare (!), GET (!), no dedupe (·), Shopify API version age (! past 12 months), private token / Admin API in client code (✖), no buyer-IP forwarding (·), Shopify CLI files tracked (!) |
+| `kekkai ./dist/client` | SSR build recognised; how to scan a local preview; storefront tokens and store handle in the bundle; changelog pages |
+| `kekkai http://localhost:<port>/<page>` or the domain | everything the static scan does, plus the storefront checks, the `*.myshopify.com` twin (domain scans only), CSP `img-src` / `media-src` / `form-action` against checkout, robots cross-check (paths behind Access → info on edge-only protection) |
+
 ---
 
 # One boundary, two tools

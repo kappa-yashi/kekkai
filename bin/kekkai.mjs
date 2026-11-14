@@ -17,7 +17,8 @@
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
 //   --accept-edge-inline  live: an inline script injected by the CDN (Cloudflare JS detections) is reported as info, not failure
-//   --platform medusa   force the Medusa profile (auto-detected: medusa-config.* in a repo, /store API on a live host)
+//   --private           repo mode: the origin is a private repository (docs/AI-footprint findings become info; detected with gh when installed)
+//   --platform medusa|shopify   force a platform profile (auto-detected: medusa-config.* in a repo, /store API on a live host)
 //   --backend <url>     storefront scan: also run the Medusa backend checks against this API host
 //   --no-watch          skip the known-incident check (no request to pwn.watch)
 //   --watch-file <f>    use a saved incidents.json instead of fetching (offline / CI)
@@ -34,8 +35,8 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '' };
-const KNOWN_FLAGS = ['--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '', private: false };
+const KNOWN_FLAGS = ['--private', '--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
@@ -53,6 +54,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--no-history') opt.history = false;
   else if (a === '--accept-edge-inline') opt.acceptEdge = true;
   else if (a === '--no-watch') opt.watch = false;
+  else if (a === '--private') opt.private = true;
   else if (a === '--platform') opt.platform = (argv[++i] || '').toLowerCase();
   else if (a === '--backend') opt.backend = argv[++i] || '';
   else if (a === '--watch-file') opt.watchFile = argv[++i] || '';
@@ -78,7 +80,7 @@ function usage() {
   --json  --summary  --out <file.md|.json|.txt>  --strict  --no-probe  --no-history
   --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N
   --no-watch  --watch-file <incidents.json>
-  --platform medusa  --backend <api-url>   (platform profile: Medusa backend + storefront)`);
+  --platform medusa|shopify  --backend <api-url>  --private`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -222,11 +224,51 @@ function findLeakyComments(html) {
   }
   return out;
 }
+// Every other HTML comment: describes-the-build (file names, repo paths, CDN, tooling) = warning; anything else = info.
+// Conditional comments, licence banners and framework markers (<!--[-->, <!--astro:…-->, <!-- htmlmin -->) are skipped.
+function findBuildComments(html) {
+  const describes = [], plain = [];
+  for (const m of html.matchAll(/<!--([\s\S]*?)-->/g)) {
+    const c = m[1].trim();
+    if (!c || /^\[|^\]|^\s*\[if |<!\[endif|^(?:astro|vue|svelte|ko|htmlmin|google_ad|ngIf|\$|\/?\$|\/\$)/i.test(c) || /\blicen[cs]e|copyright|@preserve|\(c\)\s*\d{4}/i.test(c) || c.length < 3) continue;
+    const one = c.replace(/\s+/g, ' ').slice(0, 80);
+    if (/\b[\w.-]+\.(?:md|mdx|mjs|cjs|ts|tsx|js|json|ya?ml|toml|astro|svelte|vue|css|scss|py|sh)\b|\b(?:src|public|lib|scripts|node_modules|dist|components|layouts)\/|\bcdn\b|\bunpkg|jsdelivr|cloudflare|worklet|webpack|vite\b|tailwind|gtm\b|tag ?manager|plugin|shopify|wordpress|wix|webflow|astro\b|next\.js|self-hosted|subsett?ed|βλ\.|\bsee \w/i.test(c)) describes.push(one);
+    else plain.push(one);
+  }
+  return { describes, plain };
+}
 // AI-tooling footprint. Not a vulnerability: a targeting signal. Projects visibly built with AI assistants
 // are being picked as soft targets on the assumption that the code shipped unreviewed.
 const AI_FILE_RE = /(^|\/)(CLAUDE\.md|AGENTS\.md|GEMINI\.md|\.claude\/.*|\.cursor\/.*|\.cursorrules|\.cursorignore|\.windsurfrules|\.windsurf\/.*|\.clinerules|\.aider[^/]*|\.github\/copilot-instructions\.md|\.github\/instructions\/.*|copilot-instructions\.md|\.codeium\/.*|\.continue\/.*|\.roo\/.*|\.roomodes|\.kiro\/.*|\.vibe\/.*|llms-ctx\.txt)$/i;
 const AI_TEXT_RE = /\b(?:generated (?:with|by) (?:claude|chatgpt|gpt-?4o?|copilot|cursor|gemini|codex|windsurf|aider|devin|lovable|bolt\.new|v0\.dev)|co-authored-by:\s*(?:claude|copilot|chatgpt|gemini|cursor|codex|aider|devin)|(?:built|made|vibe-?coded|written) (?:entirely |mostly |largely )?(?:with|by|using) (?:claude|chatgpt|ai|an ai|copilot|cursor|gemini|codex|lovable|bolt\.new|v0\.dev)|🤖 generated|claude\.ai\/code\/|claude-session:|anthropic\.com\/claude-code|noreply@anthropic\.com)/i;
 function findAiFootprint(s) { const m = s.match(AI_TEXT_RE); return m ? m[0] : null; }
+
+// A public version / changelog route is free reconnaissance when it is a full build history: backend services, admin features,
+// field names. The right shape is a build id + date (version.txt).
+const BACKEND_SERVICE_RE = /\b(?:crm|zoho|hubspot|salesforce|pipedrive|stripe|paypal|viva ?wallet|shopify admin|admin api|storefront api|webhooks?|supabase|firebase|airtable|zapier|make\.com|n8n|sendgrid|mailgun|mailchimp|klaviyo|brevo|postmark|resend|algolia|sentry|datadog|cloudflare access|zero trust|worker secrets?|cron trigger|kv namespace|r2 bucket)\b/gi;
+function changelogFindings(text, label) {
+  const body = text.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, '\n');
+  const entries = (body.match(/^\s*(?:[-*•]\s+\S|\d+\.\s+\S|v?\d+\.\d+(?:\.\d+)?\b|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})/gm) || []).length;
+  const svc = [...new Set([...body.matchAll(BACKEND_SERVICE_RE)].map((m) => m[0].toLowerCase()))];
+  if (svc.length) warn('changelog-backend', `${label} names backend services or internals (${svc.slice(0, 5).join(', ')}) — a public changelog is a map of the system; publish a build id + date only (version.txt), keep the history in the repo`);
+  else if (entries > 20) warn('changelog-size', `${label} is a full build history (${entries} entries) — publish a build id + date only (version.txt), keep the history in the repo`);
+}
+const HOST_CONFIG_RE = /^\/(?:_headers|_redirects|_routes\.json|\.assetsignore)$/;
+// robots.txt: every Disallow names a path to the world. Deduplicated across user-agent groups.
+const ROBOTS_PRIVATE_RE = /(^|\/)(admin|administrator|cms|login|signin|wp-admin|wp-login\.php|backend|dashboard|private|internal|staging|_admin|manage|secret|dev|wp-[a-z]+)(\/|$)/i;
+const ROBOTS_SUSPECT_RE = /(^|\/)(tools?|staff|team-only|debug|preview|drafts?|version|changelog|test|tmp|temp|backup|old|config|setup|install|ops|panel|console|reports?|exports?)(\/|$)/i;
+function robotsDisallows(text) { return [...new Set(text.split(/\r?\n/).filter((l) => /^\s*disallow\s*:\s*\S/i.test(l)).map((l) => l.replace(/^\s*disallow\s*:\s*/i, '').trim()))]; }
+function robotsFindings(text, hint, skip = new Set()) {
+  const all = robotsDisallows(text); const dis = all.filter((d) => !skip.has(d));
+  const priv = dis.filter((d) => ROBOTS_PRIVATE_RE.test(d));
+  const suspect = dis.filter((d) => !priv.includes(d) && ROBOTS_SUSPECT_RE.test(d));
+  if (priv.length) fail('robots-admin', `robots.txt advertises a private path: ${priv.join(', ')}${hint}`);
+  if (suspect.length) warn('robots-suspect', `robots.txt names internal-sounding path(s): ${suspect.join(', ')} — tools, versions, previews and backups are worth a look to anyone reading robots.txt; drop the lines and rely on X-Robots-Tag noindex from the server`);
+  const rest = dis.filter((d) => !priv.includes(d) && !suspect.includes(d));
+  if (rest.length) info('robots-disallow', `robots.txt disallows: ${rest.join(', ')} (every Disallow names a path to the world)`);
+  if (!all.length) pass('robots', 'robots.txt names no private paths');
+  return all;
+}
 
 // Comments in configuration files that are served publicly (a CMS config.yml, say). They are read by people, including the wrong ones.
 function findConfigComments(text, ext) {
@@ -263,7 +305,12 @@ function checkDisclosureText(s, label, { html = false } = {}) {
   if (hosts.length) warn('staging-host', `${label}: staging / preview host(s) in public output: ${hosts.slice(0, 4).join(', ')}`);
   const vocab = findSecurityVocab(s);
   if (vocab.length) warn('security-vocab', `${label}: describes the security setup (${vocab.slice(0, 4).join(', ')}) — public text should say "locked down", not how`);
-  if (html) { const c = findLeakyComments(s); if (c.length) warn('html-comments', `${label}: ${c.length} developer comment(s) left in the HTML, e.g. "${c[0]}"`); }
+  if (html) {
+    const c = findLeakyComments(s); if (c.length) warn('html-comments', `${label}: ${c.length} developer comment(s) left in the HTML, e.g. "${c[0]}"`);
+    const b = findBuildComments(s); const extra = b.describes.filter((x) => !c.includes(x));
+    if (extra.length) warn('html-comments', `${label}: ${extra.length} HTML comment(s) describe how the site is built (file names, repo paths, CDN, tooling), e.g. "${extra[0]}" — use the framework's own comments ({/* */} in Astro and JSX) so they never reach the page`);
+    else if (b.plain.length) info('html-comments', `${label}: ${b.plain.length} HTML comment(s) shipped, e.g. "${b.plain[0]}" — harmless, but framework comments cost nothing`);
+  }
   return sec.length + hosts.length + vocab.length;
 }
 
@@ -600,6 +647,7 @@ async function liveScan(input) {
     const r = await get(`${origin}/${p}`); if (r.status !== 200) continue;
     discl += checkDisclosureText(r.text, `/${p}`, { html: /html/i.test(r.headers['content-type'] || '') });
     if (findSecurityVocab(r.text).length || findStagingHosts(r.text).length) warn('changelog', `/${p} is public even with noindex — write security-related entries neutrally ("housekeeping", "updated project notes")`);
+    changelogFindings(r.text, `/${p}`);
   }
   if (!discl) pass('disclosure', 'no credential shapes, staging hosts or security-setup vocabulary in the document, its assets or version/changelog routes');
   for (const au of assetUrls.filter((u) => /\.m?js$/i.test(u.pathname))) { const a = await get(au.href); const loads = findCdnLoads(a.text); if (loads.length) warn('js-cdn', `${au.pathname} references a public CDN at runtime (${loads.slice(0, 3).join(', ')}) — not visible to the SRI check; vendor it`); }
@@ -648,11 +696,21 @@ async function liveScan(input) {
   const robots = await get(`${origin}/robots.txt`);
   if (robots.status === 200) {
     const lines = robots.text.split(/\r?\n/);
-    const dis = lines.filter((l) => /^\s*disallow\s*:\s*\S/i.test(l));
-    const adminish = dis.filter((l) => /(^|\/)(admin|administrator|cms|login|signin|wp-admin|wp-login\.php|backend|dashboard|private|internal|staging|_admin|manage)(\/|$)/i.test(l.replace(/^\s*disallow\s*:\s*/i, '')) || /(^|\/)(secret|dev|wp-[a-z]+)(\/|$)/i.test(l.replace(/^\s*disallow\s*:\s*/i, '')));
-    if (adminish.length) fail('robots-admin', `robots.txt advertises a private path: ${adminish.map((l) => l.trim()).join(' | ')} — robots.txt is public; hide the path with an unguessable name + noindex header instead`);
-    else if (dis.length) info('robots-disallow', `robots.txt disallows: ${dis.map((l) => l.trim()).join(' | ')} (every Disallow names a path to the world)`);
-    else pass('robots', 'robots.txt names no private paths');
+    const dis = robotsDisallows(robots.text);
+    // cross-check: a Disallow path the server itself treats as private (auth wall, Access login, noindex header) is a real private path
+    const realPrivate = [], edgeOnly = [];
+    for (const d of dis.slice(0, 12)) {
+      if (/[*$]/.test(d) || d === '/') continue;
+      const r = await get(origin + d);
+      const loc = r.headers.location || '';
+      if (/cloudflareaccess\.com|\/cdn-cgi\/access\//i.test(loc)) { realPrivate.push(`${d} (${r.status} → Access login)`); edgeOnly.push(d); }
+      else if ([401, 403].includes(r.status)) realPrivate.push(`${d} (${r.status})`);
+      else if (r.status >= 300 && r.status < 400 && /login|signin|auth/i.test(loc)) realPrivate.push(`${d} (${r.status} → login)`);
+      else if (/noindex/i.test(r.headers['x-robots-tag'] || '') && r.status === 200) realPrivate.push(`${d} (200, X-Robots-Tag noindex)`);
+    }
+    robotsFindings(robots.text, ' — robots.txt is public; hide the path with an unguessable name + an X-Robots-Tag noindex header instead', new Set(realPrivate.map((x) => x.split(' ')[0])));
+    if (realPrivate.length) fail('robots-private', `robots.txt names path(s) the server itself treats as private: ${realPrivate.join(', ')} — the server already keeps them out of search (auth / noindex), so the Disallow only advertises them; remove the lines`);
+    if (edgeOnly.length) info('edge-auth', `${edgeOnly.join(', ')} sit behind Cloudflare Access at the edge — make sure the application also verifies the Cf-Access-Jwt-Assertion token (signature, aud, expiry), so a changed or broken Access rule does not leave the path open (guide 8.4)`);
     if (/content-signal/i.test(robots.text)) warn('robots-managed', 'a managed block (Content-Signal) sits in robots.txt — your host prepended it; decide whether you want it');
     const sm = lines.find((l) => /^\s*sitemap\s*:/i.test(l));
     if (sm) info('robots-sitemap', sm.trim());
@@ -702,7 +760,7 @@ async function liveScan(input) {
     section('Inner pages');
     // sample by path on the scanned origin, so a local preview of a sitemap that names the real domain still works
     const sample = [...new Set(pageUrls.map((l) => { try { return origin + new URL(l).pathname; } catch { return null; } }).filter(Boolean))].filter((l) => l !== finalUrl.href && l !== `${origin}/`).slice(0, opt.pages);
-    const policies = new Map(); let scannedPages = 0, redirected = 0;
+    const policies = new Map(); let scannedPages = 0, redirected = 0; const scannedList = [];
     const pageIssues = new Map(); const pageIssue = (issue, pth) => (pageIssues.get(issue) ?? pageIssues.set(issue, []).get(issue)).push(pth);
     for (let l of sample) {
       let r = await get(l), hops = 0;
@@ -713,7 +771,7 @@ async function liveScan(input) {
         l = next.href; r = await get(l); hops++;
       }
       if (r.status !== 200) { warn('page', `${l} → ${r.status}`); continue; }
-      scannedPages++;
+      scannedPages++; scannedList.push(new URL(l).pathname);
       const h = r.headers; const csp = h['content-security-policy']; const pth = new URL(l).pathname;
       if (!csp && !/http-equiv\s*=\s*["']content-security-policy/i.test(r.text)) pageIssue('no CSP (neither header nor <meta>)', pth);
       else if (csp) policies.set(csp, (policies.get(csp) || []).concat(new URL(l).pathname));
@@ -738,9 +796,13 @@ async function liveScan(input) {
     if (policies.size > 1) info('page-policies', `${policies.size} distinct CSPs across sampled pages (fine if intentional: docs vs text mirror vs admin)`);
     if (redirected) warn('sitemap-redirects', `${redirected} of ${sample.length} sampled sitemap URL(s) redirect — the sitemap should list the final URLs (trailing slash included); crawlers follow, but it costs a request per page and dilutes canonicals`);
     if (!scannedPages) info('pages', `no inner page could be scanned (${sample.length} sampled)`);
-    else if (results.filter((r) => r.section === 'Inner pages' && r.level === 'fail').length === 0) pass('pages', `${scannedPages} inner page(s): CSP + HSTS present, inline code consistent`);
+    else if (results.filter((r) => r.section === 'Inner pages' && r.level === 'fail').length === 0) pass('pages', `${scannedPages} inner page(s): CSP + HSTS present, inline code consistent — ${scannedList.join(', ')}`);
+    const smHost = (() => { try { return new URL(pageUrls[0]).host; } catch { return ''; } })();
+    if (smHost && smHost !== new URL(origin).host) info('pages-host', `sitemap names ${smHost}; its paths were scanned on ${new URL(origin).host}`);
   }
   const products = detectProducts(doc.text, doc.headers, assetUrls.map((u) => u.pathname));
+  const shopHandles = shopifyStorefrontFindings([doc.text, ...assetTexts], 'live', { csp: doc.headers['content-security-policy'] || '', ownHost: host });
+  if (shopHandles) { products.push({ name: 'shopify', version: null, where: 'storefront' }); if (shopHandles.length && !/^(localhost|127\.)/.test(host)) await shopifyHandleCheck(shopHandles); }
   const backendHosts = medusaStorefrontFindings([doc.text, ...assetTexts], 'live');
   if (backendHosts) products.push({ name: 'medusa', version: null, where: 'storefront bundle' });
   const backend = opt.backend || (backendHosts || []).find((h) => h.endsWith(host.replace(/^www\./, '')));
@@ -831,8 +893,10 @@ function distScan(dir) {
   if (pathHits.size) fail('local-paths', `local filesystem paths in the output: ${[...pathHits].map(([p, f]) => `${p} (${f})`).slice(0, 5).join(', ')}`); else pass('local-paths', 'no local filesystem paths');
   if (opt.forbid.length) {
     const hits = [];
-    for (const f of text) { const s = read(f); for (const w of opt.forbid) if (hasForbidden(s, w)) hits.push(`${w} in ${f.rel}`); }
-    if (hits.length) fail('forbid', `forbidden strings found: ${hits.slice(0, 10).join('; ')}`); else pass('forbid', `none of ${opt.forbid.length} forbidden string(s) appear`);
+    const hostCfg = []; // _headers, _redirects, .assetsignore are read by Cloudflare / Netlify and not served
+    for (const f of text) { const s = read(f); for (const w of opt.forbid) if (hasForbidden(s, w)) (HOST_CONFIG_RE.test(f.rel) ? hostCfg : hits).push(`${w} in ${f.rel}`); }
+    if (hits.length) fail('forbid', `forbidden strings found: ${hits.slice(0, 10).join('; ')}`); else pass('forbid', `none of ${opt.forbid.length} forbidden string(s) appear in served files`);
+    if (hostCfg.length) info('forbid-hostcfg', `forbidden strings in host config files (${hostCfg.slice(0, 4).join('; ')}) — Cloudflare Pages / Workers and Netlify read these and do not serve them; the live scan confirms /_headers answers 404`);
   }
   if (opt.admin) {
     const leaks = text.filter((f) => !f.rel.startsWith(`/${opt.admin}/`) && f.rel !== '/_headers' && read(f).includes(opt.admin)).map((f) => f.rel);
@@ -952,7 +1016,9 @@ function distScan(dir) {
   if (g > 1) info('groups', `${g} distinct header profiles across the HTML files (fine when intentional: documents / text mirror / admin)`);
   // products visible in the output, for the known-incident check
   const distProducts = [];
-  { const texts = files.filter((f) => /\.(?:html?|m?js)$/.test(f.rel) && !/\.map$/.test(f.rel)).slice(0, 400).map((f) => read(f)); if (medusaStorefrontFindings(texts, 'build output')) distProducts.push({ name: 'medusa', version: null, where: 'storefront bundle' }); }
+  { const texts = files.filter((f) => /\.(?:html?|m?js)$/.test(f.rel) && !/\.map$/.test(f.rel)).slice(0, 400).map((f) => read(f)); if (medusaStorefrontFindings(texts, 'build output')) distProducts.push({ name: 'medusa', version: null, where: 'storefront bundle' }); if (shopifyStorefrontFindings(texts, 'build output')) distProducts.push({ name: 'shopify', version: null, where: 'storefront bundle' }); }
+  for (const f of files.filter((f) => /^\/(?:version|changelog|release-notes)(?:\/index\.html?|\.html?|\.txt|\.md)?$/i.test(f.rel))) { section('Disclosure'); changelogFindings(read(f), f.rel); }
+  ssrDistNote(dir, files);
   for (const f of files.filter((f) => /\.html?$/.test(f.rel)).slice(0, 50)) for (const pr of detectProducts(read(f), {}, files.map((x) => x.rel))) if (!distProducts.some((p) => p.name === pr.name)) distProducts.push(pr);
   // svg files
   const svgs = files.filter((f) => f.rel.endsWith('.svg'));
@@ -984,11 +1050,7 @@ function distScan(dir) {
   section('Public text files');
   const robots = files.find((f) => f.rel === '/robots.txt');
   if (robots) {
-    const dis = read(robots).split(/\r?\n/).filter((l) => /^\s*disallow\s*:\s*\S/i.test(l));
-    const adminish = dis.filter((l) => /(^|\/)(admin|administrator|cms|login|signin|wp-admin|wp-login\.php|backend|dashboard|private|internal|staging|_admin|manage)(\/|$)/i.test(l.replace(/^\s*disallow\s*:\s*/i, '')) || /(^|\/)(secret|dev|wp-[a-z]+)(\/|$)/i.test(l.replace(/^\s*disallow\s*:\s*/i, '')));
-    if (adminish.length) fail('robots-admin', `robots.txt advertises a private path: ${adminish.map((l) => l.trim()).join(' | ')}`);
-    else if (dis.length) info('robots-disallow', `robots.txt disallows: ${dis.map((l) => l.trim()).join(' | ')}`);
-    else pass('robots', 'robots.txt names no private paths');
+    robotsFindings(read(robots), ' — remove it; keep the path out of search with an X-Robots-Tag noindex header instead');
   } else info('robots', 'no robots.txt in the output');
   if (!files.some((f) => /^\/sitemap(-index|-0)?\.xml$/.test(f.rel))) info('sitemap', 'no sitemap in the output');
   const wk = files.filter((f) => f.rel.startsWith('/.well-known/'));
@@ -1004,17 +1066,29 @@ function git(dir, args, { maxBuffer = 64 * 1024 * 1024, okStatus = [0] } = {}) {
   try { return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer }); }
   catch (e) { return okStatus.includes(e.status) ? (e.stdout || '') : null; }
 }
+let repoPrivate = false; let shopifyRepo = false;
+function detectPrivateRepo(dir) {
+  const url = (git(dir, ['remote', 'get-url', 'origin']) || '').trim();
+  const m = url.match(/github\.com[/:]([^/]+)\/([^/.\s]+)/); if (!m) return false;
+  try { const out = execFileSync('gh', ['api', `repos/${m[1]}/${m[2]}`, '-q', '.private'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000 }).trim(); return out === 'true'; } catch { return false; }
+}
 function repoScan(dir) {
   section('Repository');
   const tracked = (git(dir, ['ls-files', '-z']) || '').split('\0').filter(Boolean);
   if (!tracked.length) { fail('git', `${dir} has a .git folder but git ls-files returned nothing (is git installed?)`); return; }
   info('tracked', `${tracked.length} tracked file(s) in ${dir}`);
+  repoPrivate = opt.private || detectPrivateRepo(dir);
+  if (repoPrivate) info('private', `origin is a private repository${opt.private ? ' (--private)' : ''} — staging hosts, account emails and AI footprint in it are reported as info: they matter the day the repo is shared, handed over or made public`);
   const branch = (git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']) || '').trim();
   if (branch) info('branch', `current branch: ${branch}${branch === 'main' || branch === 'master' ? '' : ' — make sure the host builds production from main, not from this branch (guide PART 7)'}`);
 
   // files that must never be tracked
   const bad = tracked.filter((f) => /(^|\/)(\.env(\.[^/]*)?|\.dev\.vars|\.npmrc|\.netrc|\.pypirc|id_(?:rsa|ed25519|ecdsa)(?:\.pub)?|[^/]*\.pem|[^/]*\.p12|[^/]*\.pfx|[^/]*\.key|credentials(?:\.json)?|service-account[^/]*\.json|\.claude\/settings\.local\.json|\.claude\/[^/]*\.json|settings\.local\.json|\.vscode\/settings\.json|\.idea\/[^/]*|wrangler\.toml|\.wrangler\/.*|\.dev\.vars\.[^/]*)$/i.test(f));
-  const benign = (f) => /\.example$|\.sample$|\.template$|\.pub$/i.test(f) || (/wrangler\.toml$/.test(f) && !/(secret|token|key)\s*=/i.test(readFileSync(join(dir, f), 'utf8')));
+  const editorCfgClean = (f) => { let t = ''; try { t = readFileSync(join(dir, f), 'utf8'); } catch { return false; } return !findSecrets(t).length && !/"[^"]*(?:token|secret|password|passwd|api[_-]?key|auth|credential)[^"]*"\s*:\s*"[^"$]{6,}"/i.test(t) && !/https?:\/\/[^\s"]*:[^\s"@]+@/.test(t); };
+  const isEditorCfg = (f) => /(^|\/)(\.vscode\/settings\.json|\.idea\/[^/]*)$/.test(f);
+  const benign = (f) => /\.example$|\.sample$|\.template$|\.pub$/i.test(f) || (/wrangler\.toml$/.test(f) && !/(secret|token|key)\s*=/i.test(readFileSync(join(dir, f), 'utf8'))) || (isEditorCfg(f) && editorCfgClean(f));
+  const editorOnly = bad.filter((f) => isEditorCfg(f) && editorCfgClean(f));
+  if (editorOnly.length) info('editor-config', `editor settings tracked (${editorOnly.slice(0, 3).join(', ')}) — no credentials inside; fine to keep if the team shares them`);
   const really = bad.filter((f) => !benign(f));
   if (really.length) fail('tracked-secrets', `credential / local-config files are tracked: ${really.slice(0, 8).join(', ')} — remove from the index, add to .gitignore, rotate what they held`);
   else pass('tracked-secrets', 'no .env / .dev.vars / key / local settings files tracked');
@@ -1050,8 +1124,9 @@ function repoScan(dir) {
   if (!secretHits) pass('secret', `${textish.length} text file(s): no credential-shaped strings`);
   if (vocabFiles.length) warn('docs-security', `docs describe the security setup: ${vocabFiles.slice(0, 5).join('; ')} — docs should say where it is configured, not how (policies, scopes, login method, app names)`);
   else pass('docs-security', 'docs do not describe the security setup');
-  if (stagingFiles.length) warn('docs-staging', `docs name staging / preview hosts: ${stagingFiles.slice(0, 4).join('; ')}`);
-  if (emailFiles.length) warn('docs-email', `docs contain account email addresses: ${emailFiles.slice(0, 4).join('; ')} — they tell a phisher which account to target`);
+  const docWarn = repoPrivate ? info : warn;
+  if (stagingFiles.length) docWarn('docs-staging', `docs name staging / preview hosts: ${stagingFiles.slice(0, 4).join('; ')}`);
+  if (emailFiles.length) docWarn('docs-email', `docs contain account email addresses: ${emailFiles.slice(0, 4).join('; ')} — they tell a phisher which account to target`);
   const comments = [];
   for (const f of textish.filter((f) => /\.(ts|tsx|js|mjs|cjs|astro|svelte|vue)$/i.test(f))) {
     let s; try { s = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
@@ -1076,7 +1151,7 @@ function repoScan(dir) {
   if (aiTracked.length) aiParts.push(`config files: ${aiTracked.slice(0, 4).join(', ')}`);
   if (aiDocs.length) aiParts.push(`attribution in docs: ${aiDocs.slice(0, 2).join('; ')}`);
   if (aiCommits.length) aiParts.push(`${aiCommits.length} commit(s) with AI co-author / generator trailers`);
-  if (aiParts.length) warn('ai-footprint', `the repository shows it was built with an AI assistant — ${aiParts.join('; ')}. For a public repo this is a targeting signal: keep agent config private (git-ignored or a separate private repo), drop the trailers, say nothing about the tooling (guide PART 7.6)`);
+  if (aiParts.length) (repoPrivate ? info : warn)('ai-footprint', `the repository shows it was built with an AI assistant — ${aiParts.join('; ')}. For a public repo this is a targeting signal: keep agent config private (git-ignored or a separate private repo), drop the trailers, say nothing about the tooling (guide PART 7.6)`);
   else pass('ai-footprint', 'no AI-assistant config files, attribution or commit trailers');
 
   // one-off scripts that write into CMS-managed content folders (guide 6.7: the repo is the content's source of truth)
@@ -1135,6 +1210,7 @@ function repoScan(dir) {
   const remote = (git(dir, ['remote', 'get-url', 'origin']) || '').trim();
   if (remote) { section('Repository'); info('remote', `origin: ${remote.replace(/\/\/[^@]+@/, '//***@')}${/github\.com/.test(remote) ? ' — if the site has a CMS or drafts, this repo must be private; check forks = 0 before any history rewrite' : ''}`); }
   medusaRepoFindings(dir, tracked);
+  if (ssrRepoFindings(dir, tracked)) shopifyRepo = true;
   return readDependencies(dir);
 }
 
@@ -1223,7 +1299,7 @@ async function loadIncidents() {
     return data;
   } catch (e) {
     if (cached) { info('watch', `pwn.watch unreachable (${e.cause?.code || e.message}); using the cached copy from ${new Date(cached.fetchedAt).toISOString().slice(0, 10)}`); return cached.data; }
-    info('watch', `pwn.watch unreachable (${e.cause?.code || e.message}) — known-incident check skipped (--no-watch silences this)`);
+    info('watch', `pwn.watch unreachable (${e.cause?.code || e.message}) — known-incident check skipped; offline or CI: save ${WATCH_URL} elsewhere and pass --watch-file <file> (--no-watch silences this)`);
     return null;
   }
 }
@@ -1474,6 +1550,140 @@ function medusaRepoFindings(dir, tracked) {
   }
   // store-side secret pattern check is in the generic pass (sk_ keys)
   return true;
+}
+
+// ───────────────────────────── platform profile: Astro SSR on Workers + headless Shopify ─────────────────────────────
+// A storefront rendered by a Worker (Astro output: server + @astrojs/cloudflare) with Shopify as the commerce backend.
+// What changes against a static site: most pages exist only at request time (dist has a handful of HTML files), the Worker
+// holds API tokens, there are webhook endpoints, staff tools behind an edge login, and a second storefront on *.myshopify.com.
+const SHOPIFY_RE = /cdn\.shopify\.com|\.myshopify\.com|x-shopify-storefront-access-token|shopify-storefront-private-token|\/api\/20\d\d-\d\d\/graphql\.json|@shopify\//i;
+function shopifyApiVersionAge(v) {
+  const [y, m] = v.split('-').map(Number); const now = new Date();
+  return (now.getUTCFullYear() - y) * 12 + (now.getUTCMonth() + 1 - m);
+}
+// Build output: is this the static half of an SSR build?
+function ssrDistNote(dir, files) {
+  const up = join(dir, '..', 'server');
+  const ssr = existsSync(join(up, 'wrangler.json')) || existsSync(join(up, 'entry.mjs')) || files.some((f) => /^\/_worker\.js(\/|$)/.test(f.rel));
+  if (!ssr) return false;
+  const html = files.filter((f) => /\.html?$/.test(f.rel)).length;
+  section('SSR build');
+  info('ssr', `server-rendered build: only ${html} prerendered HTML file(s) here; every page the Worker renders gets its headers from the middleware, not from _headers — those are checked live only. Without deploying: build, run the preview (astro preview / wrangler dev, secrets in .dev.vars next to the generated wrangler.json), scan http://localhost:<port>/<page>, stop the preview and delete that .dev.vars`);
+  return true;
+}
+// Storefront (live document + scripts, or build output)
+function shopifyStorefrontFindings(texts, label, { csp = '', ownHost = '' } = {}) {
+  const all = texts.join('\n');
+  if (!SHOPIFY_RE.test(all) && opt.platform !== 'shopify') return null;
+  section('Headless Shopify');
+  info('platform', `${label}: headless Shopify storefront (Astro + headless Shopify profile)`);
+  if (/shopify-storefront-private-token/i.test(all)) fail('private-token', 'the private Storefront API token header appears in client code — that token is server-only (it is not rate-limited per buyer and can carry wider scopes): revoke it, create a new one, call the API from the Worker');
+  else pass('private-token', 'no private Storefront token header in client code');
+  const pub = [...all.matchAll(/x-shopify-storefront-access-token["'`]?\s*[:,=]\s*["'`]?([a-f0-9]{32})\b/gi)].map((m) => m[1]);
+  if (pub.length) info('public-token', `a public Storefront token is in client code (…${pub[0].slice(-4)}) — public by design; keep its scopes to the unauthenticated_read_* the storefront needs, nothing for customers or checkouts it does not use`);
+  else if (/x-shopify-storefront-access-token/i.test(all)) info('public-token', 'the browser calls the Storefront API with a public token — keep its scopes minimal');
+  else pass('server-side', 'the browser does not call the Storefront API directly (tokens stay in the Worker)');
+  if (/\/admin\/api\/20\d\d-\d\d\//.test(all)) fail('admin-api', 'an Admin API URL is referenced from client code — the Admin API is server-only');
+  const vers = [...new Set([...all.matchAll(/\/api\/(20\d\d-(?:01|04|07|10))\/graphql\.json/g)].map((m) => m[1]))];
+  for (const v of vers) { const age = shopifyApiVersionAge(v); if (age > 12) warn('api-version', `Storefront API ${v} is ${age} months old — Shopify supports a stable version for about 12 months, then answers with the oldest supported one; bump and test`); else if (age > 9) info('api-version', `Storefront API ${v} leaves support within ~${12 - age} month(s) — plan the bump`); }
+  const handles = [...new Set([...all.matchAll(/\b([a-z0-9][a-z0-9-]{1,60})\.myshopify\.com\b/gi)].map((m) => m[1].toLowerCase()))].filter((h) => h !== 'your-store' && h !== 'example');
+  if (handles.length) info('store-handle', `store handle visible: ${handles.slice(0, 2).map((h) => h + '.myshopify.com').join(', ')} — that host is a second storefront; keep it password-protected or redirecting to your domain (kekkai checks it in a live scan)`);
+  // CSP for a Shopify storefront
+  if (csp) {
+    const pol = parseCsp(csp);
+    for (const d of ['img-src', 'media-src']) {
+      const v = pol[d]; if (!v) continue;
+      if (v.some((x) => x === '*' || x === 'https:' || x === 'http:')) warn('csp-shopify', `${d} allows any host (${v.filter((x) => x === '*' || /^https?:$/.test(x)).join(' ')}) — https://cdn.shopify.com is all a Shopify storefront needs`);
+    }
+    const fa = pol['form-action'] || [];
+    const extForms = [...all.matchAll(/<form\b[^>]*\baction\s*=\s*["'](https?:\/\/[^"'/]+)/gi)].map((m) => m[1]).filter((u) => { try { return new URL(u).host !== ownHost; } catch { return false; } });
+    if (extForms.length && fa.length && !fa.some((x) => x === '*' || extForms.some((u) => x.includes(new URL(u).host)))) fail('checkout-form', `form(s) post to ${[...new Set(extForms)].join(', ')} but form-action is ${fa.join(' ')} — the browser blocks them; send the buyer to checkout with a server redirect instead`);
+    else if (!extForms.length && /checkout/i.test(all) && fa.length) info('checkout', `no form posts to another host; with form-action ${fa.join(' ')} the checkout must leave by a server redirect (302 to the checkout URL) — that is the right pattern`);
+  }
+  return handles;
+}
+// The *.myshopify.com twin: open = an indexable duplicate of the shop with the default theme.
+async function shopifyHandleCheck(handles) {
+  for (const h of handles.slice(0, 2)) {
+    const r = await get(`https://${h}.myshopify.com/`);
+    const loc = r.headers.location || '';
+    if (r.status === 0 || r.status >= 500) { info('myshopify', `${h}.myshopify.com did not answer (${r.status || 'network'})`); continue; }
+    if (r.status >= 300 && r.status < 400) { if (/\/password/.test(loc)) pass('myshopify', `${h}.myshopify.com is password-protected`); else pass('myshopify', `${h}.myshopify.com redirects (${r.status} → ${loc.slice(0, 60)})`); continue; }
+    if (r.status === 200 && /action=["'][^"']*\/password|id=["']password|storefront-password/i.test(r.text)) { pass('myshopify', `${h}.myshopify.com shows the password page`); continue; }
+    if (r.status === 200) warn('myshopify', `${h}.myshopify.com serves an open storefront (200) — a duplicate shop on Shopify's domain with the online-store theme: protect it with the storefront password or redirect it to your domain (also a duplicate-content problem: senrigan)`);
+    else info('myshopify', `${h}.myshopify.com answers ${r.status}`);
+  }
+}
+// Repository: Workers config, Astro env schema, edge-only protection, webhooks, Shopify API versions.
+function ssrRepoFindings(dir, tracked) {
+  const readSafe = (f) => { try { return readFileSync(join(dir, f), 'utf8'); } catch { return ''; } };
+  const cfgFile = tracked.find((f) => /^astro\.config\.(?:m?js|ts|mts)$/.test(f));
+  const cfg = cfgFile ? readSafe(cfgFile) : '';
+  const wranglers = tracked.filter((f) => /(^|\/)wrangler\.(?:jsonc?|toml)$/.test(f) && !/node_modules\//.test(f));
+  const ssr = /output\s*:\s*["'`](?:server|hybrid)["'`]/.test(cfg) || /@astrojs\/cloudflare/.test(cfg);
+  const src = tracked.filter((f) => /^src\/.+\.(?:astro|ts|tsx|js|mjs|jsx|svelte|vue)$/.test(f));
+  const srcText = src.map((f) => [f, readSafe(f)]);
+  const shopify = SHOPIFY_RE.test(readSafe('package.json')) || srcText.some(([, t]) => SHOPIFY_RE.test(t)) || opt.platform === 'shopify';
+  if (!ssr && !wranglers.length && !shopify) return false;
+  section(shopify ? 'Astro + headless Shopify' : 'SSR / Workers');
+  if (ssr) info('ssr', `${cfgFile}: server output — page headers come from the middleware; scan a local preview or the live site, the build folder holds only the prerendered pages`);
+  // Workers config
+  for (const w of wranglers) {
+    const t = readSafe(w); const json = /\.jsonc?$/.test(w);
+    if (/pages_build_output_dir/.test(t)) continue; // Pages project, not a Worker
+    const flag = (k) => { const m = json ? t.match(new RegExp(`"${k}"\\s*:\\s*(true|false)`)) : t.match(new RegExp(`^\\s*${k}\\s*=\\s*(true|false)`, 'm')); return m ? m[1] === 'true' : null; };
+    const wd = flag('workers_dev'), pu = flag('preview_urls');
+    if (wd !== false) warn('workers-dev', `${w}: workers_dev is ${wd === null ? 'not set (defaults to on)' : 'true'} — the Worker also answers on <name>.<account>.workers.dev, outside your domain's WAF, Access and headers rules; set "workers_dev": false`);
+    else pass('workers-dev', `${w}: workers_dev false — custom domains only`);
+    if (pu !== false) warn('preview-urls', `${w}: preview_urls is ${pu === null ? 'not set' : 'true'} — every version gets a public preview URL; set "preview_urls": false`);
+    const vars = json ? (t.match(/"vars"\s*:\s*\{([^}]*)\}/)?.[1] || '') : (t.match(/^\[vars\]([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1] || '');
+    const secretVars = [...vars.matchAll(/["']?([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|_KEY)[A-Z0-9_]*)["']?\s*[:=]\s*["']([^"']{6,})["']/g)].map((m) => m[1]);
+    if (secretVars.length) fail('wrangler-vars', `${w}: ${secretVars.join(', ')} set as plain vars — vars are readable in the repo and the dashboard; use Worker secrets (wrangler secret put) and rotate`);
+  }
+  // Astro env schema: a token with access "public" or a PUBLIC_ env var reaches the browser bundle
+  for (const m of cfg.matchAll(/([A-Z0-9_]+)\s*:\s*envField\.\w+\(\s*\{([^}]*)\}/g)) {
+    if (!/(TOKEN|SECRET|PASSWORD|PRIVATE|KEY)/.test(m[1])) continue;
+    if (/context\s*:\s*["']client["']|access\s*:\s*["']public["']/.test(m[2]) && !/context\s*:\s*["']server["']/.test(m[2])) {
+      if (/ADMIN|PRIVATE|SECRET|PASSWORD/.test(m[1])) fail('env-public', `${cfgFile}: ${m[1]} is declared client/public in the env schema — it ends up in the browser bundle; declare it context: "server", access: "secret" and rotate`);
+      else warn('env-public', `${cfgFile}: ${m[1]} is client/public — fine only for a public Storefront token with minimal scopes; anything else goes server/secret`);
+    }
+  }
+  const pubEnv = [...new Set(srcText.flatMap(([, t]) => [...t.matchAll(/import\.meta\.env\.(PUBLIC_[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE|KEY)[A-Z0-9_]*)/g)].map((m) => m[1])))];
+  for (const n of pubEnv) (/ADMIN|PRIVATE|SECRET|PASSWORD/.test(n) ? fail : warn)('env-public', `${n} is read through a PUBLIC_ variable — Vite inlines it into client code; ${/ADMIN|PRIVATE|SECRET|PASSWORD/.test(n) ? 'move it to a server-only secret and rotate' : 'acceptable only for a public, minimally scoped token'}`);
+  // staff / admin routes protected only at the edge
+  const staff = [...new Set(tracked.filter((f) => /^src\/pages\/(?:tools|admin|internal|staff|dashboard|ops|panel|backoffice)(?:\/|\.)/.test(f)).map((f) => '/' + f.split('/')[2].replace(/\.(astro|ts|js)$/, '')))];
+  if (staff.length) {
+    const mw = tracked.find((f) => /^src\/middleware(?:\.(?:ts|js|mjs)|\/index\.(?:ts|js))$/.test(f));
+    const mwt = mw ? readSafe(mw) : '';
+    if (/cf-access-jwt-assertion|cf_authorization/i.test(mwt) && /(?:jwtVerify|verify|subtle\.verify|jose)/.test(mwt)) pass('edge-only', `${staff.join(', ')}: the middleware verifies the Access JWT — defence in depth`);
+    else if (/cf-access-jwt-assertion/i.test(mwt)) warn('edge-only', `${staff.join(', ')}: the middleware reads Cf-Access-Jwt-Assertion but no signature check is visible — verify signature (team JWKS), aud and exp, not just presence`);
+    else warn('edge-only', `${staff.join(', ')}: staff routes with no check in the application — if they rely on an edge login (Cloudflare Access), one changed rule opens them; reject in the middleware (403) any request without a valid Access JWT (signature, aud, exp)`);
+  }
+  // webhooks
+  const hooks = srcText.filter(([f, t]) => /^src\/pages\/.*webhook/i.test(f) || /x-shopify-hmac-sha256|x-shopify-topic/i.test(t) && /^src\/pages\//.test(f));
+  for (const [f, t] of hooks) {
+    const hmac = /hmac/i.test(t) || /x-shopify-hmac-sha256/i.test(t) || /signature/i.test(t);
+    const ct = /timingSafeEqual|subtle\.verify|timing-?safe|constantTime|safeEqual/i.test(t);
+    if (!hmac) fail('webhook-hmac', `${f}: webhook endpoint with no signature check — anyone can post fake events; verify X-Shopify-Hmac-Sha256 (HMAC-SHA256 of the raw body, base64) before parsing`);
+    else if (!ct) warn('webhook-hmac', `${f}: the signature is compared without a constant-time function — use crypto.subtle.verify or timingSafeEqual`);
+    else pass('webhook-hmac', `${f}: signature verified in constant time`);
+    if (/export\s+(?:const|async\s+function|function)\s+(?:GET|ALL)\b/.test(t)) warn('webhook-method', `${f}: exports GET/ALL — a webhook endpoint answers POST only`);
+    if (shopify && !/x-shopify-(?:webhook|event)-id/i.test(t)) info('webhook-dedupe', `${f}: Shopify can deliver the same webhook more than once — dedupe on X-Shopify-Webhook-Id (or X-Shopify-Event-Id) before side effects`);
+  }
+  if (shopify) {
+    // Storefront / Admin API versions pinned in code
+    const vers = new Map();
+    for (const [f, t] of srcText.concat(cfgFile ? [[cfgFile, cfg]] : [])) for (const m of t.matchAll(/(?:\/api\/|apiVersion\s*[:=]\s*["'`]|API_VERSION\s*[:=]\s*["'`])(20\d\d-(?:01|04|07|10))/g)) vers.set(m[1], f);
+    for (const [v, f] of vers) { const age = shopifyApiVersionAge(v); if (age > 12) warn('api-version', `${f}: Shopify API ${v} is ${age} months old — out of the ~12-month support window; bump and test`); else if (age > 9) info('api-version', `${f}: Shopify API ${v} leaves support within ~${12 - age} month(s)`); else pass('api-version', `${f}: Shopify API ${v} is current`); }
+    // tokens in client code
+    const clientFiles = srcText.filter(([f, t]) => /^src\/(?:scripts|components|islands)\//.test(f) && /\.(?:tsx|jsx|svelte|vue|ts|js)$/.test(f) || /\.astro$/.test(f) && /<script(?![^>]*type=["']application\/ld\+json)[^>]*>[\s\S]*?(?:shopify-storefront-private-token|\/admin\/api\/)/i.test(t));
+    const leaky = clientFiles.filter(([, t]) => /shopify-storefront-private-token|\/admin\/api\/20/i.test(t)).map(([f]) => f);
+    if (leaky.length) fail('client-token', `private Storefront token or Admin API used in client code: ${leaky.slice(0, 4).join(', ')} — both are server-only`);
+    const serverPriv = srcText.filter(([f, t]) => /shopify-storefront-private-token/i.test(t) && !leaky.includes(f)).map(([f]) => f);
+    if (serverPriv.length && !srcText.some(([, t]) => /shopify-storefront-buyer-ip/i.test(t))) info('buyer-ip', `server-side Storefront calls with a private token (${serverPriv[0]}) — pass Shopify-Storefront-Buyer-IP with the visitor's IP, otherwise every buyer shares the Worker's rate limit and bot protection`);
+    if (tracked.some((f) => /(^|\/)shopify\.app\.toml$|(^|\/)\.shopify\//.test(f))) warn('shopify-cli', 'Shopify CLI app files are tracked (shopify.app.toml / .shopify/) — they name the app and store; keep them out of a storefront repo unless it is the app');
+  }
+  return shopify;
 }
 
 // ───────────────────────────── check (decision gate) ─────────────────────────────

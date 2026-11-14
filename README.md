@@ -173,6 +173,57 @@ built on it, which inherits every Medusa issue and fix. The profile adds:
 - `@medusajs/*` versions feed the known-incident check under the product
   name "medusa" (scoped packages match their product alias)
 
+**Platform profile: Astro + headless Shopify** (auto-detected; `--platform shopify` forces it)
+
+A storefront rendered by a Worker (Astro `output: 'server'` on Cloudflare
+Workers) with Shopify as the commerce backend. Most pages exist only at
+request time, the Worker holds API tokens, there are webhook endpoints, staff
+tools behind an edge login, and a second storefront on `*.myshopify.com`. The
+profile adds:
+
+- repo: `wrangler.json(c)/.toml` with `workers_dev` / `preview_urls` not
+  switched off (the Worker answers on `*.workers.dev` too, outside your
+  domain's rules), secrets as plain `vars`, tokens declared client / public in
+  Astro's env schema or read through `PUBLIC_*` variables, staff routes
+  (`/tools`, `/admin`, `/internal` …) with no check in the middleware — edge-only
+  protection —, webhook endpoints without a constant-time signature check or
+  answering GET, no dedupe on the webhook id, a pinned Shopify API version out
+  of its ~12-month support window, the private Storefront token or the Admin
+  API in client code, private-token calls without `Shopify-Storefront-Buyer-IP`
+- build output: an SSR build is recognised (only the prerendered pages are
+  in the folder; the rest is checked live — the report says how to scan a
+  local preview without deploying)
+- live / build output: private Storefront token or Admin API URL in client
+  code (fail), public token present (info: keep its scopes minimal), the
+  store's `*.myshopify.com` handle — and in a live scan, whether that twin
+  storefront is password-protected or redirects (an open one is a duplicate
+  shop), `img-src` / `media-src` wider than `cdn.shopify.com`, forms posting to
+  another host while `form-action` is `'self'` (checkout must leave by a server
+  redirect)
+- `@shopify/*` versions feed the known-incident check as "shopify"
+
+**Also new in 1.6.0, for every site**
+
+- robots.txt: duplicates across user-agent groups collapsed; internal-sounding
+  names (`tools`, `version`, `preview`, `backup` …) warned; in a live scan every
+  Disallow path is requested — if the server itself answers 401/403, sends to a
+  login (Cloudflare Access) or marks it `X-Robots-Tag: noindex`, the line only
+  advertises a private path (fail), and edge-only protection is pointed out
+- HTML comments: any comment that describes the build (file names, repo
+  paths, CDN, tooling) is a warning, other comments are info; licence banners,
+  conditional comments and framework markers are ignored
+- public `/version` / `/changelog` pages: a warning when they name backend
+  services (CRM, webhooks, Admin API, payment, mail …) or carry a full history —
+  publish a build id and date (`version.txt`)
+- `--forbid` hits in `_headers`, `_redirects`, `.assetsignore` are info: the
+  host reads those files and does not serve them
+- repo: tracked editor settings are a failure only when they hold
+  credentials; `--private` (or `gh`, when installed, reporting the origin as
+  private) turns staging hosts, account emails and AI footprint in docs into
+  info
+- inner pages: the scanned paths are listed, and a sitemap that names another
+  host (scanning a local preview) is noted
+
 ## Options
 
 ```
@@ -188,7 +239,8 @@ built on it, which inherits every Medusa issue and fix. The profile adds:
 --admin <folder>    dist: the CMS/admin folder name
 --forbid a,b,c      strings that must not appear in the output
 --no-watch          skip the known-incident check (no request to pwn.watch)
---platform medusa   force the Medusa profile (auto-detected otherwise)
+--platform medusa|shopify   force a platform profile (auto-detected otherwise)
+--private           repo: the origin is private (docs / AI-footprint findings become info)
 --backend <url>     storefront scan: also run the Medusa backend checks against this API host
 --watch-file <f>    match against a saved incidents.json instead of fetching (offline / CI)
 ```

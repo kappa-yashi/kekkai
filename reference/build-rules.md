@@ -138,6 +138,37 @@ property; do not trade it away for a feature.
 - All `@medusajs/*` packages on one version; `kekkai check @medusajs/medusa`
   before upgrading; `kekkai ./repo` after.
 
+## Astro SSR on Workers + headless Shopify
+
+- One source for the security headers, used by both the static `_headers`
+  (prerendered pages, assets) and the middleware (every SSR response).
+- Hashes for inline scripts, regenerated at every build; never
+  `'unsafe-inline'` in `script-src`.
+- API tokens (Storefront private, Admin) only as server secrets:
+  `envField` with `context: "server", access: "secret"`, Worker secrets in
+  production, `.dev.vars` locally. Never `PUBLIC_*`, never `vars` in the
+  wrangler file. A public Storefront token, if the browser needs one, with the
+  minimum read scopes.
+- Server-side Storefront calls with a private token forward the visitor's IP
+  (`Shopify-Storefront-Buyer-IP`).
+- `workers_dev: false`, `preview_urls: false` — custom domains only.
+- Staff routes (`/tools`, `/admin` …): Cloudflare Access **and** a JWT check in
+  the middleware (signature against the team's keys, `aud`, expiry), 403
+  otherwise.
+- Webhooks: POST only, HMAC of the raw body verified in constant time, body
+  size limit, dedupe on the webhook id, logs without personal data.
+- Checkout leaves by a server redirect; `form-action 'self'` stays.
+- `img-src` / `media-src`: `'self'` + `https://cdn.shopify.com`, not `https:`.
+- The `*.myshopify.com` storefront password-protected or redirecting to the
+  domain.
+- Pinned Shopify API version bumped before it leaves support (~12 months).
+- DON'T: private paths in `robots.txt` (the server sends `X-Robots-Tag`), HTML
+  comments in layouts (framework comments instead), a public full changelog
+  (`version.txt`: build id, date, `no-store`).
+- Scan without deploying: build, local preview with secrets in a `.dev.vars`
+  next to the generated `wrangler.json`, `kekkai http://localhost:<port>/<page>`,
+  stop, delete that `.dev.vars`.
+
 ## The other half
 
 kekkai asks what the site gives away. Its twin, `senrigan`, asks what the site

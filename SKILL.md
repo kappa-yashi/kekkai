@@ -28,7 +28,16 @@ Two questions, opposite answers:
   backend: **Medusa** (auto-detected in repo, live and build output; `--platform
   medusa`, `--backend <api-url>`). A custom commerce backend built on Medusa
   gets the same checks, and its `@medusajs/*` versions feed the known-incident
-  check.
+  check. **Astro + headless Shopify** (Astro SSR on Cloudflare Workers with a
+  Shopify backend; `--platform shopify`): Workers config, env schema, staff
+  routes protected only at the edge, webhooks, API version, tokens in client
+  code, the `*.myshopify.com` twin storefront.
+- For an SSR build the build folder holds only the prerendered pages: build,
+  run the local preview (secrets in a `.dev.vars` next to the generated
+  `wrangler.json`), scan `http://localhost:<port>/<page>`, stop the preview,
+  delete that `.dev.vars`. The live domain is the final check.
+- A private repository (`--private`, or detected through `gh`) reports docs
+  hygiene and AI footprint as info; they still matter the day it is shared.
 - Only scan sites you own or are allowed to test. The live scan is read-only
   GETs, but a handful of them probe well-known leak paths.
 
@@ -116,6 +125,12 @@ propose the dependency, so the choice is made with the history in view.
 | Medusa: secret fallback or literal in `medusa-config` | the app runs on a secret that is in the repo | read it from the environment, drop the `\|\| "…"` fallback, rotate |
 | Medusa: CORS reflects an unknown origin | a catch-all pattern in storeCors / adminCors / authCors | list exact origins; re-test live with an unknown Origin header |
 | Medusa: `/admin/*` answers 200 unauthenticated, or `sk_` key in client code | the Admin API is open | revoke the key, restore authentication, rotate |
+| Shopify: staff routes with no check in the middleware | protection only at the edge (Cloudflare Access) | verify the Cf-Access-Jwt-Assertion (signature, aud, exp) in the middleware and answer 403 without it |
+| Shopify: private token / Admin API in client code, token declared public | a server-only credential reaches the browser | move it to a server secret, rotate |
+| Workers: `workers_dev` / `preview_urls` not false | the Worker answers on `*.workers.dev` outside the domain's rules | set both to false; custom domains only |
+| webhook without constant-time signature check | anyone can post fake events | verify the HMAC of the raw body with `crypto.subtle.verify` / `timingSafeEqual`, POST only, dedupe on the webhook id |
+| robots.txt names a path the server treats as private | the Disallow only advertises it | delete the line; noindex comes from the server |
+| HTML comment describes the build / changelog names backend services | free reconnaissance | framework comments; publish `version.txt` (build id + date) only |
 | Medusa: dashboard at `/app` on the public API host | the login form is one request away for anyone | access layer in front (Cloudflare Access / IP allowlist) or `admin.disable` + a private deploy |
 | edge-injected inline script (warning) | the CDN added it; per-request token, cannot be hashed; the CSP blocks it | turn the CDN feature off, or accept it (`--accept-edge-inline`) |
 | `style=""` but `style-src 'self'` | styles are silently dropped | data attributes + CSS, or CSSOM from an allowed script |

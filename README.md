@@ -224,6 +224,22 @@ profile adds:
 - inner pages: the scanned paths are listed, and a sitemap that names another
   host (scanning a local preview) is noted
 
+**New in 1.7.1: TLS, Cloudflare SSL mode, more of nginx**
+
+- TLS: days until the certificate expires (! under 14, ✖ expired — the
+  silent certbot failure), chain validity, TLS 1.0 / 1.1 still accepted (with
+  the nginx line or the Cloudflare setting that turns them off).
+- Behind Cloudflare: the SSL/TLS mode is not visible from outside, so the
+  report says what Full (strict) needs. A redirect loop is reported as the
+  signature of "Flexible" with an origin that redirects to https.
+  `--origin <ip-or-host>` checks the origin itself: is its certificate valid
+  for the domain (Cloudflare Origin CA or public) — Full (strict) ready — and
+  does it serve the site to direct requests, around Cloudflare's WAF.
+- nginx: the built-in error page (names the server even with
+  `server_tokens off`), `/nginx_status` / `/stub_status`, directory listing on
+  common asset folders, proxy headers (`Via`, `X-Upstream`, `X-Backend-Server`,
+  `X-Served-By` …) that name internal addresses or ports.
+
 **New in 1.7.0: self-hosted origins** (from a field report on a self-hosted Medusa + Astro Node shop behind nginx)
 
 - Transport: the bare IP of the host is requested — if it hands out the
@@ -264,6 +280,7 @@ profile adds:
 --forbid a,b,c      strings that must not appear in the output
 --no-watch          skip the known-incident check (no request to pwn.watch)
 --platform medusa|shopify   force a platform profile (auto-detected otherwise)
+--origin <ip|host>  live, behind Cloudflare: check the origin directly (Full (strict) ready? reachable around Cloudflare?)
 --private           repo: the origin is private (docs / AI-footprint findings become info)
 --backend <url>     storefront scan: also run the Medusa backend checks against this API host
 --watch-file <f>    match against a saved incidents.json instead of fetching (offline / CI)

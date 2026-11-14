@@ -189,6 +189,15 @@ property; do not trade it away for a feature.
 - Distribution packages: read the package changelog for CVEs, not the
   version number.
 - `/version.txt` written by the deploy, served `no-store`.
+- `ssl_protocols TLSv1.2 TLSv1.3;`; certbot (or any ACME client) renewal
+  timer with a reload hook, and an alert when it fails.
+- Your own error pages (`error_page`, `proxy_intercept_errors on`); no
+  `autoindex`; `stub_status` only on 127.0.0.1; `proxy_hide_header` for any
+  header that names the upstream (`Via`, `X-Upstream`, `X-Backend-Server`).
+- Behind Cloudflare: SSL/TLS **Full (strict)** with a Cloudflare Origin CA
+  (or public) certificate on the origin, Minimum TLS Version 1.2, and 80/443
+  open only to Cloudflare's IP ranges (or Authenticated Origin Pulls, or a
+  Tunnel) — the origin must not serve the site to anyone else.
 
 ## The other half
 

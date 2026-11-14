@@ -1126,6 +1126,18 @@ the CSP. Lessons from the field:
 - **Distribution backports.** Ubuntu and Debian patch nginx without moving
   its version number. A version match against an advisory is a question for
   the package changelog, not a verdict; hide the version either way.
+- **TLS upkeep.** Self-hosted certificates expire when the renewal timer or
+  its reload hook breaks; nothing tells you until browsers do. Watch the
+  expiry, refuse TLS 1.0 / 1.1, and serve your own error pages — the
+  built-in ones name the server even with `server_tokens off`.
+- **Behind Cloudflare.** The SSL/TLS mode decides the leg between Cloudflare
+  and the origin. *Flexible* sends it in plain http (and loops when the
+  origin redirects to https); *Full* encrypts but accepts any certificate;
+  **Full (strict)** validates it — use that, with a Cloudflare Origin CA
+  certificate (free, long-lived) or a public one. Then close the origin to
+  everyone but Cloudflare: 80/443 only from Cloudflare's IP ranges,
+  Authenticated Origin Pulls, or a Tunnel; otherwise one leaked IP bypasses
+  the WAF, rate limits and Access. `kekkai <url> --origin <ip>` checks both.
 - **Bank and payment callbacks.** A payment provider that posts back
   cross-site lands on a route that must trust nothing until its signature
   (HMAC against the ticket you stored) checks out.

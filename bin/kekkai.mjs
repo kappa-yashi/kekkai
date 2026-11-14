@@ -17,6 +17,7 @@
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
 //   --accept-edge-inline  live: an inline script injected by the CDN (Cloudflare JS detections) is reported as info, not failure
+//   --origin <ip|host>  live, behind Cloudflare: check the origin server directly (certificate valid for Full (strict)? reachable around Cloudflare?)
 //   --private           repo mode: the origin is a private repository (docs/AI-footprint findings become info; detected with gh when installed)
 //   --platform medusa|shopify   force a platform profile (auto-detected: medusa-config.* in a repo, /store API on a live host)
 //   --backend <url>     storefront scan: also run the Medusa backend checks against this API host
@@ -35,8 +36,8 @@ import { execFileSync } from 'node:child_process';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '', private: false };
-const KNOWN_FLAGS = ['--private', '--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '', private: false, origin: '' };
+const KNOWN_FLAGS = ['--origin', '--private', '--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
@@ -55,6 +56,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--accept-edge-inline') opt.acceptEdge = true;
   else if (a === '--no-watch') opt.watch = false;
   else if (a === '--private') opt.private = true;
+  else if (a === '--origin') opt.origin = argv[++i] || '';
   else if (a === '--platform') opt.platform = (argv[++i] || '').toLowerCase();
   else if (a === '--backend') opt.backend = argv[++i] || '';
   else if (a === '--watch-file') opt.watchFile = argv[++i] || '';
@@ -80,7 +82,7 @@ function usage() {
   --json  --summary  --out <file.md|.json|.txt>  --strict  --no-probe  --no-history
   --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N
   --no-watch  --watch-file <incidents.json>
-  --platform medusa|shopify  --backend <api-url>  --private`);
+  --platform medusa|shopify  --backend <api-url>  --private  --origin <ip|host>`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -298,6 +300,57 @@ function scriptSrcAllowsHost(policies, host) {
 }
 
 let scanHost = ''; let STAGING_SELF = false; // set by the live scan: the host being scanned, and whether it is itself a staging host
+// TLS: days until the certificate expires, and whether TLS 1.0 / 1.1 still handshake.
+async function tlsHandshake(opts) {
+  const tls = await import('node:tls');
+  return new Promise((res) => {
+    let done = false; const fin = (v) => { if (!done) { done = true; res(v); } };
+    try {
+      const sock = tls.connect({ port: 443, rejectUnauthorized: false, timeout: 8000, ...opts }, () => { const c = sock.getPeerCertificate(); const out = { ok: true, cert: c, authorized: sock.authorized, authError: sock.authorizationError, protocol: sock.getProtocol() }; sock.end(); fin(out); });
+      sock.on('error', (e) => fin({ ok: false, error: e.code || e.message })); sock.on('timeout', () => { sock.destroy(); fin({ ok: false, error: 'timeout' }); });
+    } catch (e) { fin({ ok: false, error: e.code || e.message }); }
+  });
+}
+async function tlsChecks(hostname, behindCf) {
+  const h = await tlsHandshake({ host: hostname, servername: hostname });
+  if (!h.ok) return;
+  const days = Math.floor((Date.parse(h.cert.valid_to) - Date.now()) / 86400e3);
+  if (Number.isFinite(days)) {
+    if (days < 0) fail('cert-expiry', `the certificate expired ${-days} day(s) ago (${h.cert.valid_to})`);
+    else if (days < 14) warn('cert-expiry', `the certificate expires in ${days} day(s) (${h.cert.valid_to}) — ${behindCf ? 'Cloudflare renews its edge certificates itself; if this persists, check the zone' : 'automatic renewal is not working: check the certbot timer / ACME client and the reload hook'}`);
+    else pass('cert-expiry', `certificate valid for ${days} more day(s)${h.cert.issuer?.O ? ` (${h.cert.issuer.O})` : ''}`);
+  }
+  if (h.authorized === false && h.authError && !/^(?:localhost)$/.test(hostname)) warn('cert-chain', `the certificate does not validate: ${h.authError} — browsers will show an error`);
+  const old = [];
+  for (const v of ['TLSv1', 'TLSv1.1']) { const r = await tlsHandshake({ host: hostname, servername: hostname, minVersion: v, maxVersion: v, ciphers: 'DEFAULT@SECLEVEL=0' }); if (r.ok) old.push(v === 'TLSv1' ? 'TLS 1.0' : 'TLS 1.1'); }
+  if (old.length) warn('tls-old', `the server still accepts ${old.join(' and ')} — ${behindCf ? 'Cloudflare: SSL/TLS → Edge Certificates → Minimum TLS Version 1.2' : 'nginx: ssl_protocols TLSv1.2 TLSv1.3;'}`);
+  else pass('tls-old', 'TLS 1.0 and 1.1 refused');
+}
+// Behind Cloudflare: the SSL/TLS mode is not visible from outside. With --origin, check the origin directly.
+async function cloudflareSsl(hostname) {
+  if (!opt.origin) { info('cf-ssl', 'behind Cloudflare — the SSL/TLS mode (Cloudflare → origin) is not visible from outside. If there is an origin server (not Pages or Workers), use Full (strict): a certificate on the origin that Cloudflare validates (Cloudflare Origin CA or a public one) — "Flexible" sends visitors\' traffic to the origin in plain http, "Full" accepts any certificate. Run again with --origin <ip-or-host> to check the origin itself'); return; }
+  const o = opt.origin.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  section('Origin behind Cloudflare');
+  const h = await tlsHandshake({ host: o, servername: hostname, rejectUnauthorized: false });
+  if (!h.ok) { fail('origin-tls', `${o}:443 does not complete a TLS handshake for ${hostname} (${h.error}) — with Full or Full (strict) Cloudflare cannot reach it; if the site works anyway, the zone is on Flexible (Cloudflare → origin over plain http): install a certificate and switch to Full (strict)`); }
+  else {
+    const issuer = `${h.cert.issuer?.O || ''} ${h.cert.issuer?.CN || ''}`;
+    const originCa = /cloudflare.*origin|origin.*cloudflare/i.test(issuer);
+    const names = (h.cert.subjectaltname || '').split(/,\s*/).map((x) => x.replace(/^DNS:/, '').toLowerCase());
+    const covers = names.some((n) => n === hostname.toLowerCase() || (n.startsWith('*.') && hostname.toLowerCase().endsWith(n.slice(1)) && hostname.split('.').length === n.split('.').length));
+    const expired = Date.parse(h.cert.valid_to) < Date.now();
+    const valid = !expired && covers && (originCa || h.authorized);
+    if (valid) pass('origin-cert', `origin certificate is valid for ${hostname} (${originCa ? 'Cloudflare Origin CA' : (h.cert.issuer?.O || 'public CA')}, until ${h.cert.valid_to}) — Full (strict) works; make sure it is the mode selected (SSL/TLS → Overview)`);
+    else warn('origin-cert', `origin certificate would fail Full (strict): ${expired ? 'expired' : !covers ? `does not name ${hostname}` : h.authError || 'not trusted'} (issuer ${issuer.trim() || 'unknown'}) — install a Cloudflare Origin CA certificate (15 years, free) or a public one, then select Full (strict)`);
+  }
+  // reachable around Cloudflare?
+  const http = await import('node:http'); const https = await import('node:https');
+  const direct = (mod, port) => new Promise((res) => { const req = mod.request({ host: o, port, path: '/', method: 'GET', headers: { host: hostname, 'user-agent': UA }, servername: hostname, rejectUnauthorized: false, timeout: 8000 }, (r) => { r.resume(); res(r.statusCode); }); req.on('error', () => res(0)); req.on('timeout', () => { req.destroy(); res(0); }); req.end(); });
+  const s80 = await direct(http, 80), s443 = await direct(https, 443);
+  if (s443 === 200 || s80 === 200) warn('origin-direct', `the origin answers the site directly (${[s80 === 200 ? 'http 200' : '', s443 === 200 ? 'https 200' : ''].filter(Boolean).join(', ')}) — anyone who learns the IP bypasses Cloudflare's WAF, rate limits and Access: allow 80/443 only from Cloudflare's IP ranges, or use Authenticated Origin Pulls / a Cloudflare Tunnel`);
+  else pass('origin-direct', `the origin does not serve the site to direct requests (http ${s80 || 'closed'}, https ${s443 || 'closed'})`);
+}
+let behindCloudflare = false;
 // Self-hosted origins: does the bare IP (or any unknown Host) get the site, and which names does the certificate carry?
 async function originExposure(hostname) {
   let ip = '';
@@ -309,6 +362,9 @@ async function originExposure(hostname) {
     else if (probe.status >= 300 && probe.status < 400) info('bare-ip', `the bare IP answers ${probe.status} → ${(probe.headers.location || '').slice(0, 60)} — it still confirms which site lives there; a default server that closes the connection says nothing`);
     else if (probe.status) pass('bare-ip', `the bare IP answers ${probe.status}, not the site`);
   }
+  await tlsChecks(hostname, cfish);
+  behindCloudflare = !!cfish;
+  if (cfish && !opt.origin) await cloudflareSsl(hostname);
   try {
     const tls = await import('node:tls');
     const names = await new Promise((res) => {
@@ -515,6 +571,12 @@ function checkDisclosure(h) {
   if (/\d/.test(server)) warn('server', `Server header discloses a version: ${server}`);
   else if (server) info('server', `Server: ${server}`);
   for (const k of ['x-powered-by', 'x-generator', 'x-aspnet-version', 'x-aspnetmvc-version', 'x-drupal-cache', 'x-wix-request-id']) if (h[k]) warn('powered', `${k}: ${h[k]} — stack disclosure`);
+  // headers a proxy adds that name the machine behind it
+  for (const k of ['via', 'x-upstream', 'x-upstream-addr', 'x-upstream-server', 'x-backend', 'x-backend-server', 'x-served-by', 'x-server', 'x-host', 'x-forwarded-server', 'x-real-server', 'x-node', 'x-instance', 'x-pod', 'x-container-id']) {
+    const v = h[k]; if (!v) continue;
+    if (/\b(?:127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|localhost)\b|:\d{2,5}\b|\.(?:internal|local|lan)\b/i.test(v)) warn('upstream', `${k}: ${v} — names an internal address or port of the machine behind the proxy; strip it at the proxy (nginx: proxy_hide_header ${k.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase())})`);
+    else if (k !== 'via' || !/cloudflare|vegur|google|varnish|fastly|akamai/i.test(v)) info('upstream', `${k}: ${v} — a proxy header that describes the chain behind the site`);
+  }
 }
 
 // Compare a document's inline code against every policy on the response (header(s) + <meta>).
@@ -588,6 +650,11 @@ async function liveScan(input) {
   // https document
   const { final: doc, chain } = await follow(u.href);
   if (doc.status === 0) { fail('fetch', `cannot fetch ${u.href}: ${doc.error}`); return; }
+  if (doc.status >= 300 && doc.status < 400 && new Set(chain.map((c) => c.url)).size < chain.length) {
+    const cf = chain.length && /cloudflare/i.test(doc.headers.server || '');
+    fail('redirect-loop', `redirect loop: ${chain.slice(0, 4).map((c) => `${c.status} ${c.url}`).join(' → ')} …${cf ? ' — behind Cloudflare this is the signature of SSL/TLS mode "Flexible" (Cloudflare → origin over http) with an origin that redirects to https: install a certificate on the origin and switch to Full (strict)' : ''}`);
+    return;
+  }
   if (chain.length > 1) info('redirects', `redirect chain: ${chain.map((c) => `${c.status} ${c.url}`).join(' → ')} → ${doc.status}`);
   if (doc.status !== 200) fail('status', `${u.href} answered ${doc.status}`);
   else pass('status', `${new URL(doc.url).href} 200 (${doc.body.length} bytes)`);
@@ -772,6 +839,8 @@ async function liveScan(input) {
     const soft404 = rnd.status === 200;
     if (soft404) warn('soft-404', 'a random URL answers 200 (SPA fallback / soft 404) — probes below compare bodies, results are weaker');
     else pass('404', `random URL answers ${rnd.status}`);
+    const defaultErr = rnd.text.match(/<hr>\s*<center>\s*(nginx|openresty|apache|caddy|litespeed)[^<]*<\/center>|<address>(Apache|nginx)[^<]*<\/address>/i);
+    if (defaultErr) warn('error-page', `the 404 page is the server's built-in one and names it ("${(defaultErr[1] || defaultErr[2]).toLowerCase()}") — server_tokens off hides only the version; serve your own error pages (nginx: error_page 404 /404.html; proxy_intercept_errors on for the app)`);
     const probes = ['.git/HEAD', '.git/config', '.env', '.env.production', 'package.json', 'package-lock.json', 'astro.config.mjs', 'tsconfig.json', 'wrangler.toml', 'netlify.toml', '.DS_Store', 'server-status', 'phpinfo.php', 'wp-login.php', 'xmlrpc.php', 'admin/', 'wp-admin/', 'cms/', '.vscode/settings.json', 'config.json', '_headers', '_redirects', 'functions/', 'src/', 'node_modules/', 'nginx.conf', 'redirects.map', 'nginx-redirects.map', '.htaccess', 'Caddyfile', 'docker-compose.yml', 'Dockerfile', 'deploy.sh', '.npmrc'];
     let hits = 0;
     for (const p of probes) {
@@ -782,7 +851,11 @@ async function liveScan(input) {
       if (/^(admin|wp-admin|cms)\/$/.test(p) && /html/.test(ct) && !/sign in|login|password|admin|cms|netlify-cms|decap|sveltia|tina|keystatic/i.test(r.text)) continue; // generic page, not an admin
       hits++; fail('probe', `/${p} is served (200, ${ct || 'unknown type'}, ${r.body.length} bytes)`);
     }
-    if (!hits) pass('probe', `${probes.length} well-known leak paths all refused`);
+    for (const p of ['nginx_status', 'stub_status', 'status/nginx']) { const r = await get(`${origin}/${p}`); if (r.status === 200 && /Active connections:/i.test(r.text)) { hits++; fail('probe', `/${p} exposes the nginx status page (connection counters) — restrict it to 127.0.0.1`); } }
+    const listing = [];
+    for (const d of ['_astro/', 'assets/', 'static/', 'uploads/', 'images/', 'img/', 'files/', 'media/', 'fonts/', 'downloads/']) { const r = await get(`${origin}/${d}`); if (r.status === 200 && /<title>Index of |<h1>Index of |Directory listing for |<a href="\.\.\/">\.\.\//i.test(r.text)) listing.push(`/${d}`); }
+    if (listing.length) { hits++; fail('autoindex', `directory listing on ${listing.join(', ')} — every file in it is browsable; turn autoindex off (nginx: autoindex off; it is off unless someone switched it on)`); }
+    if (!hits) pass('probe', `${probes.length} well-known leak paths, status pages and directory listings all refused`);
   }
 
   // sample inner pages
@@ -830,6 +903,8 @@ async function liveScan(input) {
     const smHost = (() => { try { return new URL(pageUrls[0]).host; } catch { return ''; } })();
     if (smHost && smHost !== new URL(origin).host) info('pages-host', `sitemap names ${smHost}; its paths were scanned on ${new URL(origin).host}`);
   }
+  if (behindCloudflare && opt.origin) await cloudflareSsl(host);
+  else if (opt.origin && !behindCloudflare) info('origin', '--origin given, but the site does not answer through Cloudflare — the origin checks apply only behind Cloudflare');
   const products = detectProducts(doc.text, doc.headers, assetUrls.map((u) => u.pathname));
   const shopHandles = shopifyStorefrontFindings([doc.text, ...assetTexts], 'live', { csp: doc.headers['content-security-policy'] || '', ownHost: host });
   if (shopHandles) { products.push({ name: 'shopify', version: null, where: 'storefront' }); if (shopHandles.length && !/^(localhost|127\.)/.test(host)) await shopifyHandleCheck(shopHandles); }

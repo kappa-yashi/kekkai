@@ -186,7 +186,7 @@ const SECRET_PATTERNS = [
   ['npm token', /\bnpm_[A-Za-z0-9]{36}\b/],
   ['OpenAI-style key', /\bsk-[A-Za-z0-9_-]{32,}\b/],
   ['Cloudflare API token shape', /\b(?:cf|cloudflare)[_-]?(?:api[_-]?)?token\s*[:=]\s*["']?[A-Za-z0-9_-]{40}\b/i],
-  ['connection string with password', /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqp):\/\/[^\s:\/]+:[^\s@\/]{4,}@[^\s\/]+/i, (m) => !/:(?:password|pass|secret|xxx+|\*+|<[^>]+>|\$\{[^}]+\}|\[[^\]]+\])@/i.test(m[0])],
+  ['connection string with password', /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqp):\/\/[^\s:\/]+:[^\s@\/]{4,}@[^\s\/]+/i, (m) => !/:(?:password|pass|secret|xxx+|\*+|<[^>]+>|\$\{[^}]+\}|\[[^\]]+\])@/i.test(m[0]) && !/@(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)(?:[:/]|$)/i.test(m[0])],
   ['Medusa secret API key', /\bsk_[0-9a-f]{32,}\b/],
   ['JWT', /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/],
   ['assignment of a secret', /\b(?:api[_-]?key|secret|password|passwd|client_secret|access[_-]?token|auth[_-]?token|private[_-]?key)["']?\s*[:=]\s*["']([^"'\s]{16,})["']/i, (m) => looksLikeCredential(m[1])],
@@ -297,12 +297,39 @@ function scriptSrcAllowsHost(policies, host) {
   return policies.some((p) => (effective(p, 'script-src-elem') || []).some((t) => t === '*' || t === 'https:' || t.includes(host) || (t.startsWith('*.') && host.endsWith(t.slice(1)))));
 }
 
+let scanHost = ''; let STAGING_SELF = false; // set by the live scan: the host being scanned, and whether it is itself a staging host
+// Self-hosted origins: does the bare IP (or any unknown Host) get the site, and which names does the certificate carry?
+async function originExposure(hostname) {
+  let ip = '';
+  try { const { lookup } = await import('node:dns/promises'); ip = (await lookup(hostname, { family: 4 })).address; } catch { return; }
+  const probe = await get(`http://${ip}/`);
+  const cfish = /cloudflare/i.test(probe.headers.server || '') || probe.headers['cf-ray'];
+  if (!cfish) {
+    if (probe.status === 200) warn('bare-ip', `the bare IP (http://${ip}/) answers 200 — the server hands its site to any Host name; add a default server that closes unknown hosts (nginx: return 444 on :80, ssl_reject_handshake on :443)`);
+    else if (probe.status >= 300 && probe.status < 400) info('bare-ip', `the bare IP answers ${probe.status} → ${(probe.headers.location || '').slice(0, 60)} — it still confirms which site lives there; a default server that closes the connection says nothing`);
+    else if (probe.status) pass('bare-ip', `the bare IP answers ${probe.status}, not the site`);
+  }
+  try {
+    const tls = await import('node:tls');
+    const names = await new Promise((res) => {
+      const sock = tls.connect({ host: hostname, port: 443, servername: hostname, rejectUnauthorized: false, timeout: 8000 }, () => { const c = sock.getPeerCertificate(); sock.end(); res(((c && c.subjectaltname) || '').split(/,\s*/).map((x) => x.replace(/^DNS:/, '')).filter(Boolean)); });
+      sock.on('error', () => res([])); sock.on('timeout', () => { sock.destroy(); res([]); });
+    });
+    const others = names.filter((n) => n.toLowerCase() !== hostname.toLowerCase() && n.toLowerCase() !== 'www.' + hostname.toLowerCase() && 'www.' + n.toLowerCase() !== hostname.toLowerCase());
+    if (others.length > 8 && !cfish) info('cert-names', `the certificate names ${others.length} other host(s) — every name on it is public (and in certificate-transparency logs anyway)`);
+    else if (others.length && !cfish) info('cert-names', `the certificate also names: ${others.slice(0, 6).join(', ')} — public through certificate transparency anyway; use separate certificates if some of those should not be linked to this site`);
+  } catch { /* tls optional */ }
+}
 // Run the three text scanners over one text blob and report under the current section.
 function checkDisclosureText(s, label, { html = false } = {}) {
   const sec = findSecrets(s);
   if (sec.length) fail('secret', `${label}: credential-shaped string(s): ${sec.join(', ')} — rotate first, then remove`);
   const hosts = findStagingHosts(s);
-  if (hosts.length) warn('staging-host', `${label}: staging / preview host(s) in public output: ${hosts.slice(0, 4).join(', ')}`);
+  const base = scanHost.split('.').slice(-2).join('.');
+  const own = !scanHost ? [] : hosts.filter((h) => { const hh = h.replace(/^https?:\/\//, '').split(/[/:]/)[0].toLowerCase(); return hh === scanHost || (STAGING_SELF && (hh === base || hh.endsWith('.' + base))); });
+  const foreign = hosts.filter((h) => !own.includes(h));
+  if (own.length) info('staging-self', `${label}: names its own staging host(s) (${own.slice(0, 3).join(', ')}) — expected while scanning staging; on production this must be gone`);
+  if (foreign.length) warn('staging-host', `${label}: staging / preview host(s) in public output: ${foreign.slice(0, 4).join(', ')}`);
   const vocab = findSecurityVocab(s);
   if (vocab.length) warn('security-vocab', `${label}: describes the security setup (${vocab.slice(0, 4).join(', ')}) — public text should say "locked down", not how`);
   if (html) {
@@ -555,7 +582,9 @@ async function follow(url, max = 6) {
 async function liveScan(input) {
   const u = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
   const origin = u.origin;
+  scanHost = u.hostname.toLowerCase(); STAGING_SELF = findStagingHosts(scanHost).length > 0;
   section('Transport');
+  if (!/^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(u.hostname) && !/^\d+\.\d+\.\d+\.\d+$/.test(u.hostname)) await originExposure(u.hostname);
   // https document
   const { final: doc, chain } = await follow(u.href);
   if (doc.status === 0) { fail('fetch', `cannot fetch ${u.href}: ${doc.error}`); return; }
@@ -606,7 +635,7 @@ async function liveScan(input) {
 
   // assets: css, js, font
   section('Assets');
-  const assetUrls = [];
+  const assetUrls = []; let assetHeaderGap = false;
   const css = html.external.find((e) => e.kind === 'stylesheet' && (() => { try { return new URL(e.url, finalUrl).origin === finalUrl.origin; } catch { return false; } })())?.url || html.external.find((e) => e.kind === 'stylesheet')?.url;
   const js = html.externalScripts.find((s) => { try { return new URL(s, finalUrl).origin === finalUrl.origin; } catch { return false; } });
   const font = doc.text.match(/<link[^>]+as\s*=\s*["']font["'][^>]*href\s*=\s*["']([^"']+)["']/i)?.[1] || doc.text.match(/href\s*=\s*["']([^"']+\.woff2?[^"']*)["']/i)?.[1];
@@ -625,8 +654,8 @@ async function liveScan(input) {
     checkAcao(ah, kind);
     if (au.pathname.startsWith('/cdn-cgi/')) { if (!ah['strict-transport-security']) warn(`hsts-${kind}`, `${au.pathname} is served by Cloudflare itself, not from your _headers — it has no HSTS. Turn HSTS on at the zone (SSL/TLS → Edge Certificates); includeSubDomains there covers every subdomain, so check the DNS first.`); }
     else {
-      if (!ah['strict-transport-security']) warn(`hsts-${kind}`, `no HSTS on ${kind} responses (header only under document paths?)`);
-      if (!/nosniff/i.test(ah['x-content-type-options'] || '')) warn(`nosniff-${kind}`, `no nosniff on ${kind}`);
+      if (!ah['strict-transport-security']) { warn(`hsts-${kind}`, `no HSTS on ${kind} responses (header only under document paths?)`); assetHeaderGap = true; }
+      if (!/nosniff/i.test(ah['x-content-type-options'] || '')) { warn(`nosniff-${kind}`, `no nosniff on ${kind}`); assetHeaderGap = true; }
     }
     if (kind === 'script' || kind === 'stylesheet') {
       const mapRef = a.text.match(/[#@]\s*sourceMappingURL\s*=\s*(\S+)/)?.[1] || ah['sourcemap'] || ah['x-sourcemap'];
@@ -641,6 +670,7 @@ async function liveScan(input) {
   // disclosure: the document, every fetched same-origin JS/CSS, and the usual version/changelog routes
   section('Disclosure');
   let discl = checkDisclosureText(doc.text, 'document', { html: true });
+  if (assetHeaderGap && /nginx/i.test(doc.headers.server || '') || assetHeaderGap && !doc.headers.server && !doc.headers['cf-ray']) info('nginx-inherit', 'headers present on the document but missing on assets: on nginx a location block with its own add_header drops every add_header inherited from above — include the headers snippet in each such location (or use always on a server-level include)');
   const assetTexts = [];
   for (const au of assetUrls) { const a = await get(au.href); if (a.status === 200 && !/\.(woff2?|ttf|otf)$/i.test(au.pathname)) { discl += checkDisclosureText(a.text, au.pathname); if (/\.m?js$/i.test(au.pathname)) assetTexts.push(a.text); } }
   for (const p of ['version', 'version.txt', 'changelog', 'changelog.txt', 'CHANGELOG.md', 'release-notes', 'humans.txt']) {
@@ -742,7 +772,7 @@ async function liveScan(input) {
     const soft404 = rnd.status === 200;
     if (soft404) warn('soft-404', 'a random URL answers 200 (SPA fallback / soft 404) — probes below compare bodies, results are weaker');
     else pass('404', `random URL answers ${rnd.status}`);
-    const probes = ['.git/HEAD', '.git/config', '.env', '.env.production', 'package.json', 'package-lock.json', 'astro.config.mjs', 'tsconfig.json', 'wrangler.toml', 'netlify.toml', '.DS_Store', 'server-status', 'phpinfo.php', 'wp-login.php', 'xmlrpc.php', 'admin/', 'wp-admin/', 'cms/', '.vscode/settings.json', 'config.json', '_headers', '_redirects', 'functions/', 'src/', 'node_modules/'];
+    const probes = ['.git/HEAD', '.git/config', '.env', '.env.production', 'package.json', 'package-lock.json', 'astro.config.mjs', 'tsconfig.json', 'wrangler.toml', 'netlify.toml', '.DS_Store', 'server-status', 'phpinfo.php', 'wp-login.php', 'xmlrpc.php', 'admin/', 'wp-admin/', 'cms/', '.vscode/settings.json', 'config.json', '_headers', '_redirects', 'functions/', 'src/', 'node_modules/', 'nginx.conf', 'redirects.map', 'nginx-redirects.map', '.htaccess', 'Caddyfile', 'docker-compose.yml', 'Dockerfile', 'deploy.sh', '.npmrc'];
     let hits = 0;
     for (const p of probes) {
       const r = await get(`${origin}/${p}`);
@@ -1085,9 +1115,12 @@ function repoScan(dir) {
   // files that must never be tracked
   const bad = tracked.filter((f) => /(^|\/)(\.env(\.[^/]*)?|\.dev\.vars|\.npmrc|\.netrc|\.pypirc|id_(?:rsa|ed25519|ecdsa)(?:\.pub)?|[^/]*\.pem|[^/]*\.p12|[^/]*\.pfx|[^/]*\.key|credentials(?:\.json)?|service-account[^/]*\.json|\.claude\/settings\.local\.json|\.claude\/[^/]*\.json|settings\.local\.json|\.vscode\/settings\.json|\.idea\/[^/]*|wrangler\.toml|\.wrangler\/.*|\.dev\.vars\.[^/]*)$/i.test(f));
   const editorCfgClean = (f) => { let t = ''; try { t = readFileSync(join(dir, f), 'utf8'); } catch { return false; } return !findSecrets(t).length && !/"[^"]*(?:token|secret|password|passwd|api[_-]?key|auth|credential)[^"]*"\s*:\s*"[^"$]{6,}"/i.test(t) && !/https?:\/\/[^\s"]*:[^\s"@]+@/.test(t); };
+  const npmrcClean = (f) => { let t = ''; try { t = readFileSync(join(dir, f), 'utf8'); } catch { return false; } return !/(_authToken|_auth|_password|:_authToken|always-auth\s*=\s*true.*\n.*_auth|\/\/[^\s]+:_)/i.test(t) && !findSecrets(t).length; };
   const isEditorCfg = (f) => /(^|\/)(\.vscode\/settings\.json|\.idea\/[^/]*)$/.test(f);
-  const benign = (f) => /\.example$|\.sample$|\.template$|\.pub$/i.test(f) || (/wrangler\.toml$/.test(f) && !/(secret|token|key)\s*=/i.test(readFileSync(join(dir, f), 'utf8'))) || (isEditorCfg(f) && editorCfgClean(f));
+  const benign = (f) => /\.example$|\.sample$|\.template$|\.pub$/i.test(f) || (/wrangler\.toml$/.test(f) && !/(secret|token|key)\s*=/i.test(readFileSync(join(dir, f), 'utf8'))) || (isEditorCfg(f) && editorCfgClean(f)) || (/(^|\/)\.npmrc$/.test(f) && npmrcClean(f));
   const editorOnly = bad.filter((f) => isEditorCfg(f) && editorCfgClean(f));
+  const npmrcOk = bad.filter((f) => /(^|\/)\.npmrc$/.test(f) && npmrcClean(f));
+  if (npmrcOk.length) info('npmrc', `${npmrcOk.join(', ')} tracked with package-manager settings only, no auth token — fine; tokens belong in the user-level ~/.npmrc or the CI secret store`);
   if (editorOnly.length) info('editor-config', `editor settings tracked (${editorOnly.slice(0, 3).join(', ')}) — no credentials inside; fine to keep if the team shares them`);
   const really = bad.filter((f) => !benign(f));
   if (really.length) fail('tracked-secrets', `credential / local-config files are tracked: ${really.slice(0, 8).join(', ')} — remove from the index, add to .gitignore, rotate what they held`);
@@ -1336,7 +1369,7 @@ const PRODUCT_ALIASES = { '@medusajs/': 'medusa', '@sveltia/': 'sveltia cms', 'd
 function aliasRe(name) {
   const names = [name];
   for (const [k, v] of Object.entries(PRODUCT_ALIASES)) if (name === k || (k.endsWith('/') && name.startsWith(k))) names.push(v);
-  if (/^@[^/]+\//.test(name)) names.push(name.split('/')[1]);
+  // the bare part of a scoped name ("@babel/core" → "core") is NOT an alias: generic words collide with unrelated products
   const alts = [...new Set(names)].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   return new RegExp(`(^|[^A-Za-z0-9@/._-])(?:${alts})(?![A-Za-z0-9._-])`, 'i');
 }
@@ -1352,7 +1385,17 @@ function matchIncidents(data, products, label) {
     for (const inc of incidents) {
       if (inc.isExample) continue;
       const hay = `${inc.product || ''}\n${(inc.tags || []).join(' ')}\n${(inc.affectedVersions || []).join('\n')}`;
-      const nameHit = re.test(inc.product || '') || (inc.tags || []).some((t) => t.toLowerCase() === pr.name.toLowerCase()) || (inc.affectedVersions || []).some((a) => re.test(a));
+      const clauseHit = (inc.affectedVersions || []).some((a) => re.test(a));
+      const tagHit = (inc.tags || []).some((t) => t.toLowerCase() === pr.name.toLowerCase());
+      const productHit = re.test(inc.product || '');
+      let nameHit = clauseHit || tagHit || productHit;
+      // a lockfile dependency needs package-level evidence: an affected clause that names it, a tag equal to it, or the product
+      // naming it as an npm package ("x (x on npm)", "npm package x", tag "npm"); a product word alone ("Core", "Store") is not enough
+      if (pr.where === 'lockfile' && !clauseHit && !tagHit) {
+        const esc = pr.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const npmish = new RegExp(`${esc}\\s+on\\s+npm|npm\\s+package\\s+${esc}|\\(${esc}\\)`, 'i').test(inc.product || '') || (productHit && (inc.tags || []).some((t) => /^(npm|node|javascript|js)$/i.test(t)) && pr.name.length > 4);
+        nameHit = npmish;
+      }
       if (!nameHit) continue;
       const key = `${pr.name}|${inc.slug}`; if (seen.has(key)) continue; seen.add(key);
       const link = inc.url || `https://pwn.watch/i/${inc.slug}`;
@@ -1362,7 +1405,8 @@ function matchIncidents(data, products, label) {
         // only the affected clauses that name this package (or the product line when none names a package)
         const clauses = (inc.affectedVersions || []).filter((a) => re.test(a));
         const groups = parseRanges(clauses.length ? clauses.join('; ') : (inc.affectedVersions || []).join('; '));
-        if (groups.length && inRanges(pr.version, groups)) { fails++; fail('incident', `${pr.name}@${pr.version} is in the affected range of "${inc.title}" [${sev}, ${inc.category}${inc.status === 'live' ? ', live' : ''}]${fixed ? ` — fixed in ${fixed}` : ''} · ${link}`); }
+        if (groups.length && inRanges(pr.version, groups) && pr.distro) { warns++; warn('incident', `${pr.name}@${pr.version} (${pr.distro} package) matches the affected range of "${inc.title}" [${sev}] — distributions backport fixes without changing the version: check the package changelog for the CVEs, then hide the version (server_tokens off) · ${link}`); }
+        else if (groups.length && inRanges(pr.version, groups)) { fails++; fail('incident', `${pr.name}@${pr.version} is in the affected range of "${inc.title}" [${sev}, ${inc.category}${inc.status === 'live' ? ', live' : ''}]${fixed ? ` — fixed in ${fixed}` : ''} · ${link}`); }
         else if (!groups.length && (inc.status === 'live' || inc.category === 'supply-chain') && recent(inc)) { warns++; warn('incident', `${pr.name}@${pr.version}: "${inc.title}" [${sev}, ${inc.category}] names this package but the affected versions could not be parsed (${(inc.affectedVersions || []).join(' | ').slice(0, 120)}) — verify by hand · ${link}`); }
       } else if (inc.status === 'live' && recent(inc)) {
         warns++; warn('incident', `${pr.name} (version not visible${pr.where ? `, seen in ${pr.where}` : ''}): open incident "${inc.title}" [${sev}, ${inc.category}]${fixed ? ` — fixed in ${fixed}` : ''}; check which version runs · ${link}`);
@@ -1389,8 +1433,8 @@ function readDependencies(dir) {
 function detectProducts(html, headers = {}, assetPaths = []) {
   const out = []; const add = (name, version, where) => { if (!out.some((p) => p.name === name)) out.push({ name, version: version || null, where }); };
   const gen = html.match(/<meta[^>]+name\s*=\s*["']generator["'][^>]*content\s*=\s*["']([^"']+)["']/i)?.[1] || html.match(/<meta[^>]+content\s*=\s*["']([^"']+)["'][^>]*name\s*=\s*["']generator["']/i)?.[1];
-  if (gen) { const m = gen.match(/^([A-Za-z][\w .-]*?)\s*v?(\d+(?:\.\d+)+)?/); if (m) add(m[1].trim().toLowerCase().replace(/\s+/g, ' '), m[2] || null, 'generator meta'); }
-  for (const h of ['server', 'x-powered-by', 'x-generator']) { const v = headers[h]; if (!v) continue; const m = String(v).match(/^([A-Za-z][\w.-]*)(?:\/(\d+(?:\.\d+)+))?/); if (m && !/^cloudflare$/i.test(m[1])) add(m[1].toLowerCase(), m[2] || null, `${h} header`); }
+  if (gen) { const m = gen.trim().match(/^(.+?)\s+v?(\d+(?:\.\d+)+)\b/) || gen.trim().match(/^([A-Za-z][\w .-]*[A-Za-z0-9])/); const nm = m && m[1].trim().toLowerCase().replace(/\s+/g, ' '); if (nm && nm.length >= 3) add(nm, m[2] || null, 'generator meta'); }
+  for (const h of ['server', 'x-powered-by', 'x-generator']) { const v = headers[h]; if (!v) continue; const m = String(v).match(/^([A-Za-z][\w.-]*)(?:\/(\d+(?:\.\d+)+))?/); if (m && !/^cloudflare$/i.test(m[1])) { add(m[1].toLowerCase(), m[2] || null, `${h} header`); const distro = String(v).match(/\b(ubuntu|debian|centos|red ?hat|rhel|fedora|alpine|suse|amazon linux|el\d)\b|[-~+](?:deb|ubuntu|el)\d/i); if (distro) out[out.length - 1].distro = (distro[1] || distro[0]).toLowerCase(); } }
   const all = [html, ...assetPaths].join('\n');
   if (/wp-content\/|wp-includes\//.test(all)) add('wordpress', all.match(/wp-includes\/[^"']*\?ver=(\d+(?:\.\d+)+)/)?.[1] || null, 'wp-includes paths');
   for (const m of all.matchAll(/\/(jquery|bootstrap|lodash|moment|swiper|gsap|three|alpine(?:js)?|htmx|vue|react|angular|leaflet|chart)[.-]?(?:min\.)?(?:js)?[-@.]?v?(\d+(?:\.\d+)+)?/gi)) add(m[1].toLowerCase(), m[2] || null, 'script path');
@@ -1422,6 +1466,7 @@ async function detectMedusaBackend(origin) {
 }
 async function medusaBackendScan(input, { hint = null } = {}) {
   const origin = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`).origin;
+  if (!scanHost) { scanHost = new URL(origin).hostname.toLowerCase(); STAGING_SELF = findStagingHosts(scanHost).length > 0; }
   section('Medusa backend');
   info('platform', `Medusa backend profile on ${origin} — Store API, Admin API, dashboard, CORS, disclosure (the generic document checks do not apply to a JSON API)`);
   const kind = hint || await detectMedusaBackend(origin);
@@ -1545,7 +1590,8 @@ function medusaRepoFindings(dir, tracked) {
   // env templates with real-looking values
   for (const f of tracked.filter((f) => /(^|\/)\.env\.(?:template|example|sample)$/.test(f))) {
     let t; try { t = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
-    const real = [...t.matchAll(/^(JWT_SECRET|COOKIE_SECRET|DATABASE_URL|REDIS_URL|[A-Z_]*(?:SECRET|TOKEN|KEY|PASSWORD))\s*=\s*(.+)$/gm)].filter((m) => looksLikeCredential(m[2].trim().replace(/^["']|["']$/g, '')) && !/^(?:supersecret|secret|changeme|your[-_]|<|\$\{|xxx)/i.test(m[2].trim()));
+    const isLocalUrl = (v) => /^\w+(?:\+\w+)?:\/\/[^@\s]*@?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)(?:[:/]|$)/i.test(v.replace(/^["']/, ''));
+    const real = [...t.matchAll(/^(JWT_SECRET|COOKIE_SECRET|DATABASE_URL|REDIS_URL|[A-Z_]*(?:SECRET|TOKEN|KEY|PASSWORD))\s*=\s*(.+)$/gm)].filter((m) => !isLocalUrl(m[2].trim())).filter((m) => looksLikeCredential(m[2].trim().replace(/^["']|["']$/g, '')) && !/^(?:supersecret|secret|changeme|your[-_]|<|\$\{|xxx)/i.test(m[2].trim()));
     if (real.length) fail('env-template', `${f}: ${real.map((m) => m[1]).join(', ')} carry real-looking values — templates hold placeholders only; rotate these`);
   }
   // store-side secret pattern check is in the generic pass (sk_ keys)
@@ -1728,7 +1774,7 @@ if (opt.check) { await checkProducts(opt.check); }
 const isRepo = isDir && (opt.mode === 'repo' || (opt.mode !== 'dist' && existsSync(join(target, '.git')) && !existsSync(join(target, '_headers')) && !existsSync(join(target, 'index.html'))));
 let productsForWatch = [];
 let medusaKind = null;
-if (!isDir) { const o = new URL(/^https?:\/\//i.test(target) ? target : `https://${target}`).origin; medusaKind = opt.platform === 'medusa' ? (await detectMedusaBackend(o)) || 'forced' : await detectMedusaBackend(o); }
+if (!isDir) { const o = new URL(/^https?:\/\//i.test(target) ? target : `https://${target}`).origin; medusaKind = await detectMedusaBackend(o); if (!medusaKind && opt.platform === 'medusa' && !opt.backend) medusaKind = 'forced'; }
 if (isRepo) productsForWatch = repoScan(target) || []; else if (isDir) productsForWatch = distScan(target) || []; else if (medusaKind) productsForWatch = await medusaBackendScan(target, { hint: medusaKind === 'forced' ? null : medusaKind }); else productsForWatch = (await liveScan(target)) || [];
 if (opt.watch && productsForWatch.length) { section('Known incidents (pwn.watch)'); const data = await loadIncidents(); if (data) matchIncidents(data, productsForWatch, isRepo ? `${productsForWatch.length} dependencies` : `${productsForWatch.length} detected product(s)`); }
 

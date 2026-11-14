@@ -36,6 +36,8 @@ Two questions, opposite answers:
   run the local preview (secrets in a `.dev.vars` next to the generated
   `wrangler.json`), scan `http://localhost:<port>/<page>`, stop the preview,
   delete that `.dev.vars`. The live domain is the final check.
+- Self-hosted origins (nginx in front of a Node app): read guide 8.4b; one
+  scan per host (storefront plainly, API host with `--platform medusa`).
 - A private repository (`--private`, or detected through `gh`) reports docs
   hygiene and AI footprint as info; they still matter the day it is shared.
 - Only scan sites you own or are allowed to test. The live scan is read-only

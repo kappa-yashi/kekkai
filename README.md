@@ -224,6 +224,30 @@ profile adds:
 - inner pages: the scanned paths are listed, and a sitemap that names another
   host (scanning a local preview) is noted
 
+**New in 1.7.0: self-hosted origins** (from a field report on a self-hosted Medusa + Astro Node shop behind nginx)
+
+- Transport: the bare IP of the host is requested — if it hands out the
+  site, unknown hostnames are served too (default server missing); the TLS
+  certificate's other names are listed (info). Skipped behind Cloudflare and
+  for local addresses.
+- Assets missing headers that the document has, on nginx: a hint about
+  `add_header` inheritance (a location with its own `add_header` drops the
+  inherited ones).
+- Leak probes also try server and deploy files (`nginx.conf`, redirect maps,
+  `.htaccess`, `Caddyfile`, `docker-compose.yml`, `Dockerfile`, `deploy.sh`,
+  `.npmrc`).
+- Known incidents: a `Server` version from a distribution package
+  (`nginx/1.24.0 (Ubuntu)`) is a warning, not a failure — distributions
+  backport fixes without changing the version; check the package changelog.
+- Fewer false positives: the generator meta is read as a product name
+  (`Astro v7.4.7` → astro); lockfile packages match an incident only on
+  package-level evidence (a scoped package's bare name — `core`, `store` — is
+  no longer an alias); `.npmrc` with settings only is info; local development
+  connection strings (`localhost`, `127.0.0.1`, `host.docker.internal`) in
+  example env files are not secrets; scanning a staging host, its own
+  hostname in its pages is info; `--backend` with `--platform medusa` scans the
+  target as the storefront and the backend separately.
+
 ## Options
 
 ```

@@ -1101,6 +1101,35 @@ already. HTML comments in layouts become part of every page; use the
 framework's comments. A public changelog that mentions the CRM, the webhook
 and the Admin API is a map; publish a build id and a date.
 
+## 8.4b Self-hosted origins (nginx, a Node SSR app, your own machine)
+
+No edge host, no `_headers`: nginx sets the headers and the framework sets
+the CSP. Lessons from the field:
+
+- **nginx header inheritance.** `add_header` in a `location` replaces every
+  `add_header` inherited from the server block. Assets served from their own
+  location then lose HSTS and nosniff. Include one snippet everywhere.
+- **Two kinds of pages, two kinds of CSP.** On-demand pages get the CSP as a
+  header; prerendered pages may get it as `<meta>`, where `frame-ancestors`
+  is ignored. Let nginx add `frame-ancestors 'none'` only where the response
+  has no policy of its own — a header carrying only `frame-ancestors` next to
+  a full `<meta>` policy is the correct split; two full policies are not.
+- **The default server.** Without one, the bare IP and any Host name get the
+  first site, and the TLS handshake hands out its certificate with all its
+  names. `return 444` and `ssl_reject_handshake on` close both.
+- **Admin on the API host.** Without an access layer, an IP allowlist; with
+  either, a rate limit on the login (`limit_req`, then 429). Remember that the
+  address nginx sees can differ from what an IP-lookup site shows.
+- **Loopback only.** Database, cache, search, app and worker listen on
+  127.0.0.1; the firewall opens 22, 80 and 443. Server-side calls stay on
+  loopback; the browser's CSP needs only the public API host.
+- **Distribution backports.** Ubuntu and Debian patch nginx without moving
+  its version number. A version match against an advisory is a question for
+  the package changelog, not a verdict; hide the version either way.
+- **Bank and payment callbacks.** A payment provider that posts back
+  cross-site lands on a route that must trust nothing until its signature
+  (HMAC against the ticket you stored) checks out.
+
 ## 8.5 Astro SSR + Shopify: the checks, per mode
 
 | mode | what kekkai does |

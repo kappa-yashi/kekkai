@@ -169,6 +169,27 @@ property; do not trade it away for a feature.
   next to the generated `wrangler.json`, `kekkai http://localhost:<port>/<page>`,
   stop, delete that `.dev.vars`.
 
+## Self-hosted: nginx in front of a Node SSR app
+
+- One headers snippet, included in the server block **and** in every
+  `location` that sets its own `add_header` (nginx drops inherited headers
+  there).
+- `server_tokens off`; `proxy_hide_header X-Powered-By`.
+- A default server that closes unknown hosts: `return 444` on :80,
+  `ssl_reject_handshake on` on :443 — the bare IP gets nothing.
+- When a page carries its CSP in `<meta>` (prerendered), add a
+  `frame-ancestors 'none'` header only to responses without a policy of
+  their own, so no response carries two policies.
+- Admin dashboard: IP allowlist or an access layer, plus `limit_req` on the
+  login endpoint (a few attempts a minute, then 429).
+- Every service (database, cache, search, app, worker) on 127.0.0.1; the
+  firewall opens 22, 80, 443 only. The app reaches its API over loopback, so
+  the browser CSP lists only the public API host.
+- Background worker as its own process with the admin off.
+- Distribution packages: read the package changelog for CVEs, not the
+  version number.
+- `/version.txt` written by the deploy, served `no-store`.
+
 ## The other half
 
 kekkai asks what the site gives away. Its twin, `senrigan`, asks what the site

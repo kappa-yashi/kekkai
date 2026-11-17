@@ -224,6 +224,25 @@ profile adds:
 - inner pages: the scanned paths are listed, and a sitemap that names another
   host (scanning a local preview) is noted
 
+**New in 1.7.3** (from a field report on an Astro + headless Shopify site)
+
+- Hosted platforms (Shopify, Wix, Webflow, site builders): an incident counts
+  only when it is *about* the platform, not about another company that runs
+  its shop on it; a real platform incident is info — the vendor patches it
+  for everyone.
+- Repo checks follow relative imports one level: an Access-JWT check or a
+  constant-time comparison (library call or XOR-accumulate loop) in a helper
+  the middleware or the route imports now counts.
+- Edge-injected inline scripts name the Cloudflare feature and the switch:
+  JavaScript Detections / Bot Fight Mode, Rocket Loader, Email Address
+  Obfuscation, Web Analytics automatic setup, Zaraz.
+- A target that cannot be reached is **NOT CHECKED** (exit 2) with the real
+  cause, not BOUNDARY BROKEN; behind a proxy the report says Node's fetch
+  needs `NODE_USE_ENV_PROXY=1`.
+- Build folder: a sitemap that robots.txt declares but the build lacks is a
+  warning (info on an SSR build — check it live); `/version`, `/version.json`,
+  `/build.txt` are recognised as build fingerprints.
+
 **New in 1.7.1: TLS, Cloudflare SSL mode, more of nginx**
 
 - TLS: days until the certificate expires (! under 14, ✖ expired — the

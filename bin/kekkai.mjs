@@ -355,7 +355,7 @@ async function cloudflareSsl(hostname) {
   if (s443 === 200 || s80 === 200) warn('origin-direct', `the origin answers the site directly (${[s80 === 200 ? 'http 200' : '', s443 === 200 ? 'https 200' : ''].filter(Boolean).join(', ')}) — anyone who learns the IP bypasses Cloudflare's WAF, rate limits and Access: allow 80/443 only from Cloudflare's IP ranges, or use Authenticated Origin Pulls / a Cloudflare Tunnel`);
   else pass('origin-direct', `the origin does not serve the site to direct requests (http ${s80 || 'closed'}, https ${s443 || 'closed'})`);
 }
-let behindCloudflare = false;
+let behindCloudflare = false; let notChecked = '';
 // Self-hosted origins: does the bare IP (or any unknown Host) get the site, and which names does the certificate carry?
 async function originExposure(hostname) {
   let ip = '';
@@ -455,6 +455,15 @@ function evaluateDoc(doc, policies) {
   if (doc.eventHandlers) r.handlersBlocked = policies.some((p) => !allowsInlineAttr(effective(p, 'script-src-attr')));
   return r;
 }
+// which dashboard switch injected it
+function edgeFeature(body) {
+  if (/__CF\$cv\$params|\/cdn-cgi\/challenge-platform\//i.test(body)) return 'JavaScript Detections (Security → Bots: Bot Fight Mode / JS detections — under Bot Fight Mode it cannot be switched off alone)';
+  if (/cloudflareinsights|beacon\.min\.js/i.test(body)) return 'Web Analytics automatic setup (Analytics & Logs → Web Analytics → the site → disable automatic injection, or use the manual snippet)';
+  if (/email-decode|__cf_email__/i.test(body)) return 'Email Address Obfuscation (Security → Settings / Scrape Shield)';
+  if (/rocket-loader|__cfRLUnblockHandlers/i.test(body)) return 'Rocket Loader (Speed → Optimization → Content Optimization)';
+  if (/\/cdn-cgi\/zaraz\//i.test(body)) return 'Zaraz (Zaraz → settings, or move the tools server-side)';
+  return 'a Cloudflare edge feature';
+}
 const EDGE_RE = /__CF\$cv\$params|\/cdn-cgi\/challenge-platform\/|\/cdn-cgi\/scripts\/|email-decode|__cf_email__|cloudflareinsights|rocket-loader|__cfRLUnblockHandlers/i;
 // Report the evaluation under the current section.
 function reportInline(doc, policies, label) {
@@ -467,7 +476,7 @@ function reportInline(doc, policies, label) {
   else {
     const edge = ev.blockedScripts.filter((sc) => EDGE_RE.test(sc.body)).length, own = ev.blockedScripts.length - edge;
     if (own) fail('inline-js', `${own} of ${n} inline script(s) are blocked by the CSP — no matching hash/nonce in some policy (stale hash? trailing newline changes it)`);
-    if (edge) (opt.acceptEdge ? info : warn)('inline-js-edge', `${edge} inline script(s) injected at the edge by Cloudflare (JS detections / analytics / Rocket Loader) — blocked by the CSP, so it never runs; it carries a per-request token and cannot be hashed. Turn the feature off, or accept it${opt.acceptEdge ? ' (accepted)' : ' (--accept-edge-inline)'}.`);
+    if (edge) { const feats = [...new Set(ev.blockedScripts.filter((sc) => EDGE_RE.test(sc.body)).map((sc) => edgeFeature(sc.body)))]; (opt.acceptEdge ? info : warn)('inline-js-edge', `${edge} inline script(s) injected at the edge by Cloudflare — ${feats.join('; ')} — blocked by the CSP, so it never runs; it changes per request and cannot be hashed. Turn that feature off, or accept it${opt.acceptEdge ? ' (accepted)' : ' (--accept-edge-inline)'}.`); }
   }
   if (doc.styleAttrs || doc.styleTags) {
     if (!policies.length || !ev.stylesGoverned) info('inline-css', `${doc.styleAttrs} style="" attribute(s), ${doc.styleTags} <style> tag(s), styles not governed by a CSP`);
@@ -633,7 +642,7 @@ async function get(url, { redirect = 'manual', method = 'GET', headers: extra = 
     const r = await fetch(url, { method, redirect, headers: { 'user-agent': UA, 'accept': '*/*', 'cache-control': 'no-cache', ...extra }, signal: ctl.signal });
     const buf = Buffer.from(await r.arrayBuffer());
     return { status: r.status, headers: lower(Object.fromEntries(r.headers.entries())), body: buf, text: buf.toString('utf8'), url };
-  } catch (e) { return { status: 0, headers: {}, body: Buffer.alloc(0), text: '', url, error: e.cause?.code || e.name || String(e) }; }
+  } catch (e) { return { status: 0, headers: {}, body: Buffer.alloc(0), text: '', url, error: e.name === 'AbortError' ? 'timeout (15 s)' : [e.cause?.code, e.cause?.message && !String(e.cause.message).includes(e.cause?.code || '\u0000') ? e.cause.message : '', !e.cause ? e.message : ''].filter(Boolean).join(' — ') || String(e) }; }
   finally { clearTimeout(t); }
 }
 async function follow(url, max = 6) {
@@ -654,7 +663,11 @@ async function liveScan(input) {
   if (!/^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(u.hostname) && !/^\d+\.\d+\.\d+\.\d+$/.test(u.hostname)) await originExposure(u.hostname);
   // https document
   const { final: doc, chain } = await follow(u.href);
-  if (doc.status === 0) { fail('fetch', `cannot fetch ${u.href}: ${doc.error}`); return; }
+  if (doc.status === 0) {
+    const proxied = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY;
+    notChecked = `cannot reach ${u.href}: ${doc.error}${proxied && !process.env.NODE_USE_ENV_PROXY && !/^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(u.hostname) ? ' — this environment routes traffic through a proxy (HTTPS_PROXY) and Node\'s fetch ignores it; run with NODE_USE_ENV_PROXY=1 (Node 22.21+ / 24) or from a machine with direct access' : ''}`;
+    info('fetch', notChecked); return;
+  }
   if (doc.status >= 300 && doc.status < 400 && new Set(chain.map((c) => c.url)).size < chain.length) {
     const cf = chain.length && /cloudflare/i.test(doc.headers.server || '');
     fail('redirect-loop', `redirect loop: ${chain.slice(0, 4).map((c) => `${c.status} ${c.url}`).join(' → ')} …${cf ? ' — behind Cloudflare this is the signature of SSL/TLS mode "Flexible" (Cloudflare → origin over http) with an origin that redirects to https: install a certificate on the origin and switch to Full (strict)' : ''}`);
@@ -1162,12 +1175,22 @@ function distScan(dir) {
   if (robots) {
     robotsFindings(read(robots), ' — remove it; keep the path out of search with an X-Robots-Tag noindex header instead');
   } else info('robots', 'no robots.txt in the output');
-  if (!files.some((f) => /^\/sitemap(-index|-0)?\.xml$/.test(f.rel))) info('sitemap', 'no sitemap in the output');
+  const declared = robots ? [...read(robots).matchAll(/^\s*sitemap\s*:\s*(\S+)/gim)].map((m) => { try { return new URL(m[1]).pathname; } catch { return m[1]; } }) : [];
+  const ssrSibling = existsSync(join(dir, '..', 'server'));
+  for (const d of declared) {
+    if (files.some((f) => f.rel === d)) pass('sitemap', `${d} declared in robots.txt and present`);
+    else (ssrSibling ? info : warn)('sitemap-missing', `robots.txt declares ${d} but the build has no such file${ssrSibling ? ' — this is an SSR build, the server may render it: check it live' : ' — search engines get a 404; the sitemap step stopped writing it (integration removed, a site URL missing in the config, or a changed route)'}`);
+  }
+  if (!declared.length && !files.some((f) => /^\/sitemap(-index|-0)?\.xml$/.test(f.rel))) info('sitemap', 'no sitemap in the output');
   const wk = files.filter((f) => f.rel.startsWith('/.well-known/'));
   if (wk.length) info('well-known', `.well-known: ${wk.map((f) => f.rel).join(', ')}`);
   const vt = files.find((f) => f.rel === '/version.txt');
   if (vt) { const h = effectiveHeaders('/version.txt', rules); info('version', `/version.txt present (${/no-store/i.test(h['cache-control'] || '') ? 'no-store' : 'CACHEABLE — add Cache-Control: no-store'})`); }
-  else info('version', 'no /version.txt build fingerprint — add one so "is the new build live?" has a one-request answer');
+  else {
+    const alt = files.find((f) => /^\/(?:version(?:\.json|\/index\.html?|\.html?)?|build(?:\.txt|\.json)|\.well-known\/version(?:\.txt|\.json)?)$/i.test(f.rel));
+    if (alt) info('version', `build fingerprint at ${alt.rel} — fine; a plain /version.txt (build id + date, no-store) is the one-request answer tools expect`);
+    else info('version', 'no /version.txt build fingerprint — add one so "is the new build live?" has a one-request answer');
+  }
   return distProducts;
 }
 
@@ -1454,11 +1477,13 @@ function aliasRe(name) {
   return new RegExp(`(^|[^A-Za-z0-9@/._-])(?:${alts})(?![A-Za-z0-9._-])`, 'i');
 }
 const tokenRe = (name) => new RegExp(`(^|[^A-Za-z0-9@/._-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9._-])`, 'i');
+// hosted platforms with no version on the site's side (the vendor runs and patches them)
+const SAAS = new Set(['shopify', 'wix', 'webflow', 'hotelwize']);
 // products: [{ name, version|null, where }] — name is an npm package or a platform/product keyword.
 function matchIncidents(data, products, label) {
   const incidents = data?.incidents || [];
   if (!incidents.length || !products.length) return;
-  const seen = new Set(); let fails = 0, warns = 0;
+  const seen = new Set(); let fails = 0, warns = 0, notes = 0;
   const recent = (inc) => (Date.now() - Date.parse(inc.updatedAt || inc.startedAt || 0)) < 400 * 86400e3;
   for (const pr of products) {
     const re = aliasRe(pr.name);
@@ -1476,6 +1501,9 @@ function matchIncidents(data, products, label) {
         const npmish = new RegExp(`${esc}\\s+on\\s+npm|npm\\s+package\\s+${esc}|\\(${esc}\\)`, 'i').test(inc.product || '') || (productHit && (inc.tags || []).some((t) => /^(npm|node|javascript|js)$/i.test(t)) && pr.name.length > 4);
         nameHit = npmish;
       }
+      // a platform detected without a version (cdn.shopify.com in the page, a storefront bundle, …) needs the incident to be ABOUT
+      // that platform: a tag or an affected clause that only says "the breached shop ran on Shopify" is a different victim
+      if (!pr.version && pr.where !== 'lockfile' && !productHit) nameHit = false;
       if (!nameHit) continue;
       const key = `${pr.name}|${inc.slug}`; if (seen.has(key)) continue; seen.add(key);
       const link = inc.url || `https://pwn.watch/i/${inc.slug}`;
@@ -1488,12 +1516,15 @@ function matchIncidents(data, products, label) {
         if (groups.length && inRanges(pr.version, groups) && pr.distro) { warns++; warn('incident', `${pr.name}@${pr.version} (${pr.distro} package) matches the affected range of "${inc.title}" [${sev}] — distributions backport fixes without changing the version: check the package changelog for the CVEs, then hide the version (server_tokens off) · ${link}`); }
         else if (groups.length && inRanges(pr.version, groups)) { fails++; fail('incident', `${pr.name}@${pr.version} is in the affected range of "${inc.title}" [${sev}, ${inc.category}${inc.status === 'live' ? ', live' : ''}]${fixed ? ` — fixed in ${fixed}` : ''} · ${link}`); }
         else if (!groups.length && (inc.status === 'live' || inc.category === 'supply-chain') && recent(inc)) { warns++; warn('incident', `${pr.name}@${pr.version}: "${inc.title}" [${sev}, ${inc.category}] names this package but the affected versions could not be parsed (${(inc.affectedVersions || []).join(' | ').slice(0, 120)}) — verify by hand · ${link}`); }
+      } else if (inc.status === 'live' && recent(inc) && SAAS.has(pr.name)) {
+        // hosted platform: there is no version on our side to upgrade — worth knowing, nothing to fix in the site
+        notes++; info('incident', `${pr.name} (hosted platform, seen in ${pr.where || 'runtime'}): open incident "${inc.title}" [${sev}, ${inc.category}] — the vendor patches it for everyone; read it in case it touches your account or checkout · ${link}`);
       } else if (inc.status === 'live' && recent(inc)) {
         warns++; warn('incident', `${pr.name} (version not visible${pr.where ? `, seen in ${pr.where}` : ''}): open incident "${inc.title}" [${sev}, ${inc.category}]${fixed ? ` — fixed in ${fixed}` : ''}; check which version runs · ${link}`);
       }
     }
   }
-  if (!fails && !warns) pass('incidents', `${label} matched against ${incidents.length} incidents (updated ${String(data.updatedAt || data.generatedAt || '').slice(0, 10)}): nothing open or affected`);
+  if (!fails && !warns && !notes) pass('incidents', `${label} matched against ${incidents.length} incidents (updated ${String(data.updatedAt || data.generatedAt || '').slice(0, 10)}): nothing open or affected`);
 }
 // Dependencies from package.json + lockfile (npm v2/v3, pnpm, yarn classic/berry — best effort).
 function readDependencies(dir) {
@@ -1743,6 +1774,18 @@ async function shopifyHandleCheck(handles) {
 // Repository: Workers config, Astro env schema, edge-only protection, webhooks, Shopify API versions.
 function ssrRepoFindings(dir, tracked) {
   const readSafe = (f) => { try { return readFileSync(join(dir, f), 'utf8'); } catch { return ''; } };
+  // a check often lives in a helper the route or middleware imports: read relative imports one level deep
+  const withImports = (f, text) => {
+    const base = f.split('/').slice(0, -1).join('/');
+    const parts = [text];
+    for (const m of text.matchAll(/(?:import\s[^'"]*?from\s*|import\s*\(\s*|require\(\s*)["'](\.{1,2}\/[^"']+)["']/g)) {
+      const rel = join(base, m[1]).replace(/\\/g, '/').replace(/^\.\//, '');
+      const cand = [rel, ...['.ts', '.js', '.mjs', '.mts', '.tsx', '/index.ts', '/index.js'].map((e) => rel.replace(/\.(js|mjs)$/, '') + e)];
+      const hit = cand.find((c) => tracked.includes(c));
+      if (hit) parts.push(readSafe(hit));
+    }
+    return parts.join('\n');
+  };
   const cfgFile = tracked.find((f) => /^astro\.config\.(?:m?js|ts|mts)$/.test(f));
   const cfg = cfgFile ? readSafe(cfgFile) : '';
   const wranglers = tracked.filter((f) => /(^|\/)wrangler\.(?:jsonc?|toml)$/.test(f) && !/node_modules\//.test(f));
@@ -1780,16 +1823,18 @@ function ssrRepoFindings(dir, tracked) {
   const staff = [...new Set(tracked.filter((f) => /^src\/pages\/(?:tools|admin|internal|staff|dashboard|ops|panel|backoffice)(?:\/|\.)/.test(f)).map((f) => '/' + f.split('/')[2].replace(/\.(astro|ts|js)$/, '')))];
   if (staff.length) {
     const mw = tracked.find((f) => /^src\/middleware(?:\.(?:ts|js|mjs)|\/index\.(?:ts|js))$/.test(f));
-    const mwt = mw ? readSafe(mw) : '';
+    const mwt = mw ? withImports(mw, readSafe(mw)) : '';
     if (/cf-access-jwt-assertion|cf_authorization/i.test(mwt) && /(?:jwtVerify|verify|subtle\.verify|jose)/.test(mwt)) pass('edge-only', `${staff.join(', ')}: the middleware verifies the Access JWT — defence in depth`);
     else if (/cf-access-jwt-assertion/i.test(mwt)) warn('edge-only', `${staff.join(', ')}: the middleware reads Cf-Access-Jwt-Assertion but no signature check is visible — verify signature (team JWKS), aud and exp, not just presence`);
     else warn('edge-only', `${staff.join(', ')}: staff routes with no check in the application — if they rely on an edge login (Cloudflare Access), one changed rule opens them; reject in the middleware (403) any request without a valid Access JWT (signature, aud, exp)`);
   }
   // webhooks
   const hooks = srcText.filter(([f, t]) => /^src\/pages\/.*webhook/i.test(f) || /x-shopify-hmac-sha256|x-shopify-topic/i.test(t) && /^src\/pages\//.test(f));
-  for (const [f, t] of hooks) {
+  for (const [f, t0] of hooks) {
+    const t = withImports(f, t0);
     const hmac = /hmac/i.test(t) || /x-shopify-hmac-sha256/i.test(t) || /signature/i.test(t);
-    const ct = /timingSafeEqual|subtle\.verify|timing-?safe|constantTime|safeEqual/i.test(t);
+    // constant time: a library call, or the classic XOR-accumulate loop (diff |= a[i] ^ b[i]) with no early return
+    const ct = /timingSafeEqual|subtle\.verify|timing-?safe|constant-?time|safeEqual|safeCompare|secureCompare/i.test(t) || /\|=\s*[^;\n]*\^/.test(t);
     if (!hmac) fail('webhook-hmac', `${f}: webhook endpoint with no signature check — anyone can post fake events; verify X-Shopify-Hmac-Sha256 (HMAC-SHA256 of the raw body, base64) before parsing`);
     else if (!ct) warn('webhook-hmac', `${f}: the signature is compared without a constant-time function — use crypto.subtle.verify or timingSafeEqual`);
     else pass('webhook-hmac', `${f}: signature verified in constant time`);
@@ -1882,17 +1927,17 @@ const latest = await latestPromise;
 if (latest && verCmp(latest, VERSION) > 0) updateMsg = `kekkai ${latest} is out — this is ${VERSION}. Update before trusting the report: npx --yes clear-npx-cache (npx) · git pull (a clone) · replace the installed skill folder (Claude skill)`;
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
 for (const r of results) counts[r.level]++;
-const failed = counts.fail > 0 || (opt.strict && counts.warn > 0);
+const failed = !notChecked && (counts.fail > 0 || (opt.strict && counts.warn > 0));
 const mode = isRepo ? 'repository' : isDir ? 'build output' : 'live';
 const again = isRepo ? 'then scan the build and the live site' : 'then run again against the LIVE response';
 const isLive = !isDir;
-const handoff = apiTarget ? '' : isLive ? `senrigan (千里眼) reads the other half of the same boundary — what the site fails to tell search engines and LLMs. Same target:\n    npx github:kappa-yashi/senrigan ${target}` : isRepo ? '' : `senrigan (千里眼) reads the other half of the same boundary — titles, canonicals, sitemap, structured data. Same folder:\n    npx github:kappa-yashi/senrigan ${target}`;
-const verdict = failed ? `BOUNDARY BROKEN — fix the ✖ items, ${again}.` : isRepo ? 'BOUNDARY HOLDS — repository clean. Next: scan dist/ and the live site.' : 'BOUNDARY HOLDS — no failures. Re-run after deploy: the live response is the only truth.';
+const handoff = apiTarget || notChecked ? '' : isLive ? `senrigan (千里眼) reads the other half of the same boundary — what the site fails to tell search engines and LLMs. Same target:\n    npx github:kappa-yashi/senrigan ${target}` : isRepo ? '' : `senrigan (千里眼) reads the other half of the same boundary — titles, canonicals, sitemap, structured data. Same folder:\n    npx github:kappa-yashi/senrigan ${target}`;
+const verdict = notChecked ? `NOT CHECKED — ${notChecked}. Nothing about the site's security was concluded.` : failed ? `BOUNDARY BROKEN — fix the ✖ items, ${again}.` : isRepo ? 'BOUNDARY HOLDS — repository clean. Next: scan dist/ and the live site.' : 'BOUNDARY HOLDS — no failures. Re-run after deploy: the live response is the only truth.';
 const plainMark = { pass: '✔', warn: '!', fail: '✖', info: '·' };
 function render(fmt, color) {
   const c = (code, s) => (color ? `\x1b[${code}m${s}\x1b[0m` : s);
   const mark = { pass: c(32, '✔'), warn: c(33, '!'), fail: c(31, '✖'), info: c(90, '·') };
-  const shown = opt.summary ? results.filter((r) => r.level === 'fail' || r.level === 'warn') : results;
+  const shown = opt.summary ? results.filter((r) => r.level === 'fail' || r.level === 'warn' || r.id === 'fetch') : results;
   const lines = [];
   if (fmt === 'md') {
     lines.push(`# kekkai (結界) ${VERSION} — ${mode} scan of ${target}`, '', ...(updateMsg ? [`> ! ${updateMsg}`, ''] : []), `**${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info** — ${verdict}`, '');
@@ -1913,11 +1958,11 @@ function render(fmt, color) {
   lines.push('');
   return lines.join('\n');
 }
-const jsonOut = () => JSON.stringify({ kekkai: VERSION, latest: latest || null, target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: !failed, senrigan: handoff ? `npx github:kappa-yashi/senrigan ${target}` : null, results }, null, 2);
+const jsonOut = () => JSON.stringify({ kekkai: VERSION, latest: latest || null, target, mode: isRepo ? 'repo' : isDir ? 'dist' : 'live', counts, ok: notChecked ? null : !failed, notChecked: notChecked || null, senrigan: handoff ? `npx github:kappa-yashi/senrigan ${target}` : null, results }, null, 2);
 if (opt.json) console.log(jsonOut()); else console.log(render('text', process.stdout.isTTY));
 if (opt.out) {
   const { writeFileSync } = await import('node:fs');
   writeFileSync(opt.out, opt.out.endsWith('.json') ? jsonOut() : opt.out.endsWith('.md') ? render('md', false) : render('text', false));
   console.error(`report written to ${opt.out}`);
 }
-process.exit(failed ? 1 : 0);
+process.exit(notChecked ? 2 : failed ? 1 : 0);

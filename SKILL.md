@@ -109,7 +109,9 @@ propose the dependency, so the choice is made with the history in view.
    dependencies) or run `npx github:kappa-yashi/kekkai <target>`.
 
 2. **Read the report top to bottom.** `✖` is a failure, `!` a weakness worth a
-   decision, `·` a fact. Exit code 1 means the boundary is broken.
+   decision, `·` a fact. Exit code 1 means the boundary is broken. `NOT CHECKED`
+   (exit 2) means the target was not reached — report the cause; it is not a
+   verdict.
 
 3. **Fix in this order** (later steps depend on earlier ones):
    1. choose the CSP strategy (`reference/hardening.md`, PART 2)

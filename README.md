@@ -14,7 +14,11 @@ be.
 
 One file, zero dependencies, Node 18+. Reference stack: Astro, built to static
 files, on Cloudflare Pages (or any host that applies a `_headers` file at the
-edge: Netlify, etc.). The checks are framework-agnostic.
+edge: Netlify, etc.). The checks are framework-agnostic, and they reach the
+places a static or headless site actually leaks from: the **git repository**
+behind it, a **server-rendered** build on Workers or Node, a **headless
+backend** (Medusa, Shopify), a **self-hosted origin** behind nginx or
+Cloudflare, its **cookies** and its **subdomains**.
 
 ```
 npx github:kappa-yashi/kekkai https://www.example.com
@@ -202,7 +206,7 @@ profile adds:
   redirect)
 - `@shopify/*` versions feed the known-incident check as "shopify"
 
-**Also new in 1.6.0, for every site**
+**Public files, comments, changelogs** (every site)
 
 - robots.txt: duplicates across user-agent groups collapsed; internal-sounding
   names (`tools`, `version`, `preview`, `backup` …) warned; in a live scan every
@@ -224,7 +228,7 @@ profile adds:
 - inner pages: the scanned paths are listed, and a sitemap that names another
   host (scanning a local preview) is noted
 
-**New in 1.8.0: cookie scope and subdomain takeover** (live)
+**Cookies and subdomain takeover** (live)
 
 - Cookies set by the scanned responses: `Domain=` (whole domain) is info for
   ordinary values and a warning for session-like ones (name like
@@ -243,7 +247,7 @@ profile adds:
   the whole domain, the takeover message says the claimed subdomain would
   read and overwrite them. `--resolver <ip>` picks the DNS server.
 
-**New in 1.7.3** (from a field report on an Astro + headless Shopify site)
+**Accuracy: what is not reported, and how unreachable targets are handled**
 
 - Hosted platforms (Shopify, Wix, Webflow, site builders): an incident counts
   only when it is *about* the platform, not about another company that runs
@@ -262,7 +266,7 @@ profile adds:
   warning (info on an SSR build — check it live); `/version`, `/version.json`,
   `/build.txt` are recognised as build fingerprints.
 
-**New in 1.7.1: TLS, Cloudflare SSL mode, more of nginx**
+**TLS, Cloudflare SSL mode, nginx** (live)
 
 - TLS: days until the certificate expires (! under 14, ✖ expired — the
   silent certbot failure), chain validity, TLS 1.0 / 1.1 still accepted (with
@@ -278,7 +282,7 @@ profile adds:
   common asset folders, proxy headers (`Via`, `X-Upstream`, `X-Backend-Server`,
   `X-Served-By` …) that name internal addresses or ports.
 
-**New in 1.7.0: self-hosted origins** (from a field report on a self-hosted Medusa + Astro Node shop behind nginx)
+**Self-hosted origins** (live)
 
 - Transport: the bare IP of the host is requested — if it hands out the
   site, unknown hostnames are served too (default server missing); the TLS
@@ -305,36 +309,62 @@ profile adds:
 ## Options
 
 ```
---json              machine-readable output
---summary           only warnings and failures, one line each, plus counts
---out <file>        also write the report (.json / .md / .txt)
---strict            warnings count as failures (exit 1)
---no-probe          live: skip the leak-path probes
---pages N           live: sample N inner pages from the sitemap (default 5)
---no-history        repo: skip the git-history scan
---accept-edge-inline  a CDN-injected inline script (Cloudflare JS detections) is info instead of warning
---repo | --dist     force the mode for a folder
---admin <folder>    dist: the CMS/admin folder name
---forbid a,b,c      strings that must not appear in the output
---no-watch          skip the known-incident check (no request to pwn.watch)
---platform medusa|shopify   force a platform profile (auto-detected otherwise)
---subdomains        live: check subdomains from certificate transparency for dangling CNAMEs / takeover
---subdomain-list a,b  live: check these subdomains instead (no crt.sh request)
---resolver <ip>     DNS server for the subdomain checks
---version           print the version (every scan also checks GitHub for a newer release, once a day; --no-update-check skips it)
---origin <ip|host>  live, behind Cloudflare: check the origin directly (Full (strict) ready? reachable around Cloudflare?)
---private           repo: the origin is private (docs / AI-footprint findings become info)
---backend <url>     storefront scan: also run the Medusa backend checks against this API host
---watch-file <f>    match against a saved incidents.json instead of fetching (offline / CI)
+Output
+  --json              machine-readable output
+  --summary           only warnings and failures, one line each, plus counts
+  --out <file>        also write the report (.json / .md / .txt)
+  --strict            warnings count as failures (exit 1)
+  --version           print the version
+
+Live
+  --pages N           sample N inner pages from the sitemap (default 5)
+  --no-probe          skip the leak-path probes
+  --accept-edge-inline  a CDN-injected inline script (Cloudflare JS detections …) is info instead of warning
+  --origin <ip|host>  behind Cloudflare: check the origin directly (Full (strict) ready? reachable around Cloudflare?)
+  --subdomains        check subdomains from certificate transparency for dangling CNAMEs / takeover (asks crt.sh)
+  --subdomain-list a,b  check these subdomains instead (no crt.sh request)
+  --resolver <ip>     DNS server for the subdomain checks
+  --backend <url>     storefront scan: also run the Medusa backend checks against this API host
+
+Build folder / repository
+  --repo | --dist     force the mode for a folder
+  --admin <folder>    the CMS/admin folder name
+  --forbid a,b,c      strings that must not appear in the output (whole tokens)
+  --no-history        repo: skip the git-history scan
+  --private           repo: the origin is private (docs / AI-footprint findings become info)
+
+Profiles and feeds
+  --platform medusa|shopify   force a platform profile (auto-detected otherwise)
+  --no-watch          skip the known-incident check (no request to pwn.watch)
+  --watch-file <f>    match against a saved incidents.json instead of fetching (offline / CI)
+  --no-update-check   skip the daily check for a newer kekkai release
 ```
 
-Exit code 0 = boundary holds, 1 = boundary broken, 2 = usage.
+Exit code 0 = boundary holds, 1 = boundary broken, 2 = usage error or
+**NOT CHECKED** (the target could not be reached — the report gives the cause
+and concludes nothing).
+
+## What kekkai sends out
+
+Nothing about the site you scan leaves your machine except the requests to
+the site itself. The other requests:
+
+| to | when | what |
+|---|---|---|
+| `api.github.com` | every run, cached a day | newest kekkai tag (`--no-update-check` skips) |
+| `pwn.watch` | every run, ETag-cached | the public incident feed; matching is local (`--no-watch` skips) |
+| `raw.githubusercontent.com` | with `--subdomains`, cached a week | takeover fingerprints (can-i-take-over-xyz) |
+| `crt.sh` | only with `--subdomains` | the domain name, to list certificate names |
 
 ## Local preview with real headers
 
 `astro preview` and `python -m http.server` do not apply `_headers`. The guide
 ships a 20-line `serve.py` that does; scan `http://127.0.0.1:4399` and the
-transport checks are skipped automatically.
+transport checks are skipped automatically. For a server-rendered build
+(Astro `output: 'server'` on Workers or Node), the build folder holds only
+the prerendered pages: run the framework's preview with the secrets in a
+`.dev.vars` next to the generated `wrangler.json`, scan
+`http://localhost:<port>/<page>`, then stop it and delete that `.dev.vars`.
 
 ## One boundary, two tools
 
@@ -380,12 +410,20 @@ how to read the report, and in which order to fix things;
 `reference/build-rules.md` holds the rules to write by; `reference/hardening.md` is the long-form guide (headers template, two CSP
 strategies with code, build fingerprint, host-dashboard traps, leak audit, the
 threat model of a Git-based CMS, and what the repository itself discloses:
-secrets, docs, changelogs, history rewriting). Copy the folder to `~/.claude/skills/kekkai`
-or add it to your project's skills.
+secrets, docs, changelogs, history rewriting, platform profiles, self-hosted
+origins, cookies and subdomains). Copy the folder to `~/.claude/skills/kekkai`
+or add it to your project's skills. An installed skill is a copy: the skill
+starts every session by fetching the newest kekkai and says when the copy
+you installed is behind — replace the folder then.
 
 ## Limits
 
-- Not a vulnerability scanner for server-side applications.
+- Not a vulnerability scanner for server-side applications, and not for
+  WordPress: it checks the boundary of static and headless sites and the
+  servers directly in front of them.
+- Read-only: GET, OPTIONS and TLS handshakes. No forms, no logins, no
+  brute force; rate limits on logins are not tested.
+- Cookies written by JavaScript are not seen (no headless browser).
 - Cannot see your host dashboard (bot rules, Access policies, managed
   robots.txt); it only observes the effects.
 - Unknown options exit with code 2 and a suggestion; a target never starts with `-`.

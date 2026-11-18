@@ -224,6 +224,25 @@ profile adds:
 - inner pages: the scanned paths are listed, and a sitemap that names another
   host (scanning a local preview) is noted
 
+**New in 1.8.0: cookie scope and subdomain takeover** (live)
+
+- Cookies set by the scanned responses: `Domain=` (whole domain) is info for
+  ordinary values and a warning for session-like ones (name like
+  sess/sid/auth/token/jwt/csrf, or HttpOnly) — every subdomain can read and
+  overwrite them; no `Secure` on https; `SameSite=None` (warning without
+  `Secure`, browsers reject it); `__Host-` / `__Secure-` prefix rules broken
+  (fail). Cookies written by JavaScript are not seen.
+- `--subdomains`: names from certificate transparency (crt.sh — the one
+  request that names the domain to a third party, so it is opt-in), or your
+  own with `--subdomain-list a,b,c`. Each CNAME is resolved: a target that no
+  longer exists is a **dangling CNAME** (fail); a target that answers with a
+  known "unclaimed" page is matched against the
+  [can-i-take-over-xyz](https://github.com/EdOverflow/can-i-take-over-xyz)
+  fingerprints (fetched weekly, built-in fallback) — fail only where that list
+  says the service is vulnerable, warning otherwise. When cookies are set for
+  the whole domain, the takeover message says the claimed subdomain would
+  read and overwrite them. `--resolver <ip>` picks the DNS server.
+
 **New in 1.7.3** (from a field report on an Astro + headless Shopify site)
 
 - Hosted platforms (Shopify, Wix, Webflow, site builders): an incident counts
@@ -299,6 +318,9 @@ profile adds:
 --forbid a,b,c      strings that must not appear in the output
 --no-watch          skip the known-incident check (no request to pwn.watch)
 --platform medusa|shopify   force a platform profile (auto-detected otherwise)
+--subdomains        live: check subdomains from certificate transparency for dangling CNAMEs / takeover
+--subdomain-list a,b  live: check these subdomains instead (no crt.sh request)
+--resolver <ip>     DNS server for the subdomain checks
 --version           print the version (every scan also checks GitHub for a newer release, once a day; --no-update-check skips it)
 --origin <ip|host>  live, behind Cloudflare: check the origin directly (Full (strict) ready? reachable around Cloudflare?)
 --private           repo: the origin is private (docs / AI-footprint findings become info)

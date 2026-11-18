@@ -17,6 +17,9 @@
 //   --pages N           live mode: how many internal pages to sample from the sitemap (default 5)
 //   --no-history        repo mode: skip the git-history secret scan
 //   --accept-edge-inline  live: an inline script injected by the CDN (Cloudflare JS detections) is reported as info, not failure
+//   --subdomains        live: list subdomains from certificate transparency (crt.sh) and check each for a dangling CNAME / unclaimed service (takeover)
+//   --subdomain-list a,b  live: check these subdomains (no crt.sh request)
+//   --resolver <ip[:port]>  DNS server for the subdomain checks
 //   --version           print the version; every scan also checks GitHub for a newer release (one request, cached a day; --no-update-check skips)
 //   --origin <ip|host>  live, behind Cloudflare: check the origin server directly (certificate valid for Full (strict)? reachable around Cloudflare?)
 //   --private           repo mode: the origin is a private repository (docs/AI-footprint findings become info; detected with gh when installed)
@@ -39,8 +42,8 @@ const VERSION = (() => { try { return JSON.parse(readFileSync(join(fileURLToPath
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '', private: false, origin: '', updateCheck: true };
-const KNOWN_FLAGS = ['--version', '-v', '--no-update-check', '--origin', '--private', '--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
+const opt = { json: false, strict: false, probe: true, admin: '', forbid: [], pages: 5, history: true, mode: '', acceptEdge: false, out: '', summary: false, force: false, init: false, watch: true, watchFile: '', check: null, platform: '', backend: '', private: false, origin: '', updateCheck: true, subdomains: false, subList: [], resolver: '' };
+const KNOWN_FLAGS = ['--subdomains', '--subdomain-list', '--resolver', '--version', '-v', '--no-update-check', '--origin', '--private', '--platform', '--backend', '--no-watch', '--watch-file', '--force', '--json', '--strict', '--no-probe', '--no-history', '--accept-edge-inline', '--repo', '--dist', '--admin', '--forbid', '--pages', '--out', '--summary', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
@@ -61,6 +64,9 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--private') opt.private = true;
   else if (a === '--version' || a === '-v') { console.log(`kekkai ${VERSION}`); process.exit(0); }
   else if (a === '--no-update-check') opt.updateCheck = false;
+  else if (a === '--subdomains') opt.subdomains = true;
+  else if (a === '--subdomain-list') { opt.subdomains = true; opt.subList = (argv[++i] || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean); }
+  else if (a === '--resolver') opt.resolver = argv[++i] || '';
   else if (a === '--origin') opt.origin = argv[++i] || '';
   else if (a === '--platform') opt.platform = (argv[++i] || '').toLowerCase();
   else if (a === '--backend') opt.backend = argv[++i] || '';
@@ -87,7 +93,8 @@ function usage() {
   --json  --summary  --out <file.md|.json|.txt>  --strict  --no-probe  --no-history
   --repo | --dist  --accept-edge-inline  --admin <folder>  --forbid a,b,c  --pages N
   --no-watch  --watch-file <incidents.json>
-  --platform medusa|shopify  --backend <api-url>  --private  --origin <ip|host>`);
+  --platform medusa|shopify  --backend <api-url>  --private  --origin <ip|host>
+  --subdomains  --subdomain-list a,b  --resolver <ip>`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -641,6 +648,7 @@ async function get(url, { redirect = 'manual', method = 'GET', headers: extra = 
   try {
     const r = await fetch(url, { method, redirect, headers: { 'user-agent': UA, 'accept': '*/*', 'cache-control': 'no-cache', ...extra }, signal: ctl.signal });
     const buf = Buffer.from(await r.arrayBuffer());
+    try { const sc = r.headers.getSetCookie ? r.headers.getSetCookie() : []; if (sc.length && scanHost && new URL(url).hostname.toLowerCase() === scanHost) for (const c of sc) cookieJar.push({ raw: c, path: new URL(url).pathname }); } catch { /* optional */ }
     return { status: r.status, headers: lower(Object.fromEntries(r.headers.entries())), body: buf, text: buf.toString('utf8'), url };
   } catch (e) { return { status: 0, headers: {}, body: Buffer.alloc(0), text: '', url, error: e.name === 'AbortError' ? 'timeout (15 s)' : [e.cause?.code, e.cause?.message && !String(e.cause.message).includes(e.cause?.code || '\u0000') ? e.cause.message : '', !e.cause ? e.message : ''].filter(Boolean).join(' — ') || String(e) }; }
   finally { clearTimeout(t); }
@@ -921,6 +929,8 @@ async function liveScan(input) {
     const smHost = (() => { try { return new URL(pageUrls[0]).host; } catch { return ''; } })();
     if (smHost && smHost !== new URL(origin).host) info('pages-host', `sitemap names ${smHost}; its paths were scanned on ${new URL(origin).host}`);
   }
+  cookieFindings(u.protocol === 'https:');
+  if (opt.subdomains && !/^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(u.hostname)) await subdomainFindings(u.hostname.toLowerCase());
   if (behindCloudflare && opt.origin) await cloudflareSsl(host);
   else if (opt.origin && !behindCloudflare) info('origin', '--origin given, but the site does not answer through Cloudflare — the origin checks apply only behind Cloudflare');
   const products = detectProducts(doc.text, doc.headers, assetUrls.map((u) => u.pathname));
@@ -1855,6 +1865,122 @@ function ssrRepoFindings(dir, tracked) {
     if (tracked.some((f) => /(^|\/)shopify\.app\.toml$|(^|\/)\.shopify\//.test(f))) warn('shopify-cli', 'Shopify CLI app files are tracked (shopify.app.toml / .shopify/) — they name the app and store; keep them out of a storefront repo unless it is the app');
   }
   return shopify;
+}
+
+// ───────────────────────────── cookies and subdomains ─────────────────────────────
+const cookieJar = [];
+const SENSITIVE_COOKIE_RE = /sess|sid\b|^sid|auth|token|jwt|login|csrf|xsrf|remember|identity|account|customer/i;
+function parseSetCookie(raw) {
+  const [nv, ...attrs] = raw.split(';').map((x) => x.trim());
+  const eq = nv.indexOf('='); const name = eq > 0 ? nv.slice(0, eq) : nv;
+  const a = {}; for (const x of attrs) { const i = x.indexOf('='); const k = (i > 0 ? x.slice(0, i) : x).toLowerCase(); a[k] = i > 0 ? x.slice(i + 1) : true; }
+  return { name, domain: typeof a.domain === 'string' ? a.domain.replace(/^\./, '').toLowerCase() : '', path: typeof a.path === 'string' ? a.path : '', secure: !!a.secure, httpOnly: !!a.httponly, sameSite: typeof a.samesite === 'string' ? a.samesite.toLowerCase() : '', expired: (typeof a['max-age'] === 'string' && Number(a['max-age']) <= 0) || (typeof a.expires === 'string' && Date.parse(a.expires) < Date.now()) };
+}
+let domainWideCookies = [];
+function cookieFindings(https) {
+  const seen = new Map(); for (const c of cookieJar) { const p = parseSetCookie(c.raw); if (!p.expired && !seen.has(p.name)) seen.set(p.name, p); }
+  if (!seen.size) return;
+  section('Cookies');
+  const wide = [], sensitiveWide = [], insecure = [], none = [], noneInsecure = [], badPrefix = [];
+  for (const c of seen.values()) {
+    const sens = SENSITIVE_COOKIE_RE.test(c.name) || c.httpOnly;
+    if (c.domain) { wide.push(c.name); if (sens) sensitiveWide.push(`${c.name} (Domain=${c.domain}${c.httpOnly ? ', HttpOnly' : ''})`); }
+    if (https && !c.secure) insecure.push(c.name);
+    if (c.sameSite === 'none') (c.secure ? none : noneInsecure).push(c.name);
+    if (/^__Host-/.test(c.name) && (!c.secure || c.domain || c.path !== '/')) badPrefix.push(`${c.name} (${[!c.secure && 'no Secure', c.domain && 'has Domain', c.path !== '/' && `Path=${c.path || 'unset'}`].filter(Boolean).join(', ')})`);
+    if (/^__Secure-/.test(c.name) && !c.secure) badPrefix.push(`${c.name} (no Secure)`);
+  }
+  domainWideCookies = wide;
+  if (badPrefix.length) fail('cookie-prefix', `cookie prefix rules broken — the browser drops these: ${badPrefix.join('; ')}`);
+  if (sensitiveWide.length) warn('cookie-scope', `session-like cookie(s) set for the whole domain: ${sensitiveWide.join(', ')} — every subdomain can read and overwrite them (cookie tossing); a forgotten or taken-over subdomain is enough. Keep them host-only (no Domain attribute), ideally __Host-, Secure, HttpOnly, SameSite=Lax`);
+  const plainWide = wide.filter((n) => !sensitiveWide.some((x) => x.startsWith(n + ' ')));
+  if (plainWide.length) info('cookie-scope', `cookie(s) set for the whole domain: ${plainWide.join(', ')} — readable and writable by every subdomain; fine for non-sensitive values (a consent choice shared with a checkout subdomain), not for anything that identifies or authorises`);
+  if (insecure.length) warn('cookie-secure', `cookie(s) without Secure on an https site: ${insecure.join(', ')} — they can also travel over plain http`);
+  if (noneInsecure.length) warn('cookie-samesite', `SameSite=None without Secure: ${noneInsecure.join(', ')} — browsers reject these cookies outright; add Secure or drop SameSite=None`);
+  if (none.length) info('cookie-samesite', `SameSite=None: ${none.join(', ')} — sent on requests from other sites; make sure that is needed`);
+  if (!badPrefix.length && !sensitiveWide.length && !insecure.length) pass('cookies', `${seen.size} cookie(s): ${[...seen.keys()].slice(0, 6).join(', ')} — scope, Secure and prefixes in order (cookies written by JavaScript are not seen)`);
+}
+// Takeover fingerprints: can-i-take-over-xyz (EdOverflow), fetched once a week; built-in fallback below.
+const TAKEOVER_FALLBACK = [
+  { service: 'GitHub Pages', cname: ['github.io'], fingerprint: "There isn't a GitHub Pages site here", vulnerable: true },
+  { service: 'Heroku', cname: ['herokuapp.com', 'herokudns.com'], fingerprint: 'no-such-app.html', vulnerable: true },
+  { service: 'Heroku', cname: ['herokuapp.com', 'herokudns.com'], fingerprint: 'No such app', vulnerable: true },
+  { service: 'AWS S3', cname: ['amazonaws.com'], fingerprint: 'The specified bucket does not exist', vulnerable: true },
+  { service: 'AWS S3', cname: ['amazonaws.com'], fingerprint: 'NoSuchBucket', vulnerable: true },
+  { service: 'Microsoft Azure', cname: ['azurewebsites.net', 'cloudapp.net', 'trafficmanager.net', 'blob.core.windows.net', 'cloudapp.azure.com'], fingerprint: '', nxdomain: true, vulnerable: true },
+  { service: 'Microsoft Azure', cname: ['azurewebsites.net'], fingerprint: '404 Web Site not found', vulnerable: true },
+  { service: 'Fastly', cname: ['fastly.net'], fingerprint: 'Fastly error: unknown domain', vulnerable: true },
+  { service: 'Ghost', cname: ['ghost.io'], fingerprint: 'The thing you were looking for is no longer here', vulnerable: false },
+  { service: 'Zendesk', cname: ['zendesk.com'], fingerprint: 'Help Center Closed', vulnerable: false },
+  { service: 'Shopify', cname: ['myshopify.com'], fingerprint: 'Sorry, this shop is currently unavailable', vulnerable: false },
+  { service: 'Netlify', cname: ['netlify.app', 'netlify.com'], fingerprint: 'Not Found - Request ID', vulnerable: false },
+  { service: 'Vercel', cname: ['vercel.app', 'vercel-dns.com', 'now.sh'], fingerprint: 'DEPLOYMENT_NOT_FOUND', vulnerable: false },
+  { service: 'Cloudflare Pages', cname: ['pages.dev'], fingerprint: '', nxdomain: true, vulnerable: false },
+  { service: 'Cloudflare Workers', cname: ['workers.dev'], fingerprint: '', nxdomain: true, vulnerable: false },
+];
+async function takeoverFingerprints() {
+  const { tmpdir } = await import('node:os'); const { writeFileSync } = await import('node:fs');
+  const cachePath = join(tmpdir(), 'kekkai-takeover.json');
+  try { const c = JSON.parse(readFileSync(cachePath, 'utf8')); if (Date.now() - c.at < 7 * 86400e3 && Array.isArray(c.list)) return { list: c.list, source: 'can-i-take-over-xyz (cached)' }; } catch { /* none */ }
+  try {
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 8000);
+    const r = await fetch('https://raw.githubusercontent.com/EdOverflow/can-i-take-over-xyz/master/fingerprints.json', { headers: { 'user-agent': UA }, signal: ctl.signal }); clearTimeout(t);
+    if (!r.ok) throw new Error(String(r.status));
+    const raw = await r.json();
+    const list = raw.map((x) => ({ service: x.service, cname: x.cname || [], fingerprint: x.fingerprint || '', nxdomain: !!x.nxdomain, vulnerable: x.vulnerable === true || /^vulnerable$/i.test(x.status || '') })).filter((x) => x.cname.length);
+    try { writeFileSync(cachePath, JSON.stringify({ at: Date.now(), list })); } catch { /* optional */ }
+    return { list: list.concat(TAKEOVER_FALLBACK.filter((f) => !list.some((l) => l.service === f.service))), source: 'can-i-take-over-xyz' };
+  } catch { return { list: TAKEOVER_FALLBACK, source: 'built-in list (can-i-take-over-xyz unreachable)' }; }
+}
+async function ctSubdomains(apex) {
+  try {
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 25000);
+    const r = await fetch(`https://crt.sh/?q=${encodeURIComponent('%.' + apex)}&output=json`, { headers: { 'user-agent': UA }, signal: ctl.signal }); clearTimeout(t);
+    if (!r.ok) return { names: [], error: `crt.sh ${r.status}` };
+    const rows = await r.json();
+    const names = new Set();
+    for (const row of rows) for (const n of String(row.name_value || '').split(/\n/)) { const h = n.trim().toLowerCase(); if (h && !h.startsWith('*') && (h === apex || h.endsWith('.' + apex))) names.add(h); }
+    return { names: [...names] };
+  } catch (e) { return { names: [], error: `crt.sh unreachable (${e.cause?.code || e.name})` }; }
+}
+async function subdomainFindings(host) {
+  const parts = host.split('.'); const apex = parts.slice(-2).join('.');
+  section('Subdomains');
+  let names = opt.subList.map((n) => (n.includes('.') ? n : `${n}.${apex}`));
+  if (!names.length) {
+    const ct = await ctSubdomains(apex);
+    if (ct.error) { info('subdomains', `${ct.error} — pass names yourself with --subdomain-list a,b,c`); return; }
+    names = ct.names; info('subdomains', `${names.length} name(s) from certificate transparency for ${apex} (this asked crt.sh about the domain; certificates are public anyway)`);
+  }
+  names = names.filter((n) => n !== host).slice(0, 150);
+  if (!names.length) { pass('subdomains', 'no other names to check'); return; }
+  const dns = await import('node:dns/promises');
+  const R = new dns.Resolver({ timeout: 4000, tries: 2 }); if (opt.resolver) R.setServers([opt.resolver]);
+  const { list, source } = await takeoverFingerprints();
+  const dangling = [], unclaimed = [], parked = [];
+  const exists = async (name) => { try { await R.resolve4(name); return true; } catch (e) { if (['ENOTFOUND', 'NXDOMAIN'].includes(e.code)) return false; } try { await R.resolve6(name); return true; } catch (e) { return !['ENOTFOUND', 'NXDOMAIN'].includes(e.code) ? null : false; } };
+  const check = async (name) => {
+    let cname = '';
+    try { cname = ((await R.resolveCname(name))[0] || '').toLowerCase(); } catch { /* not a CNAME */ }
+    if (!cname) return;
+    const known = list.filter((f) => f.cname.some((c) => cname === c || cname.endsWith('.' + c)));
+    const target = await exists(cname);
+    if (target === false) {
+      const vuln = known.find((f) => f.nxdomain && f.vulnerable);
+      dangling.push(`${name} → ${cname}${known[0] ? ` (${known[0].service}${vuln ? ', claimable' : ''})` : ''}`); return;
+    }
+    if (!known.length) return;
+    let body = '';
+    for (const proto of ['https', 'http']) { const r = await get(`${proto}://${name}/`, { redirect: 'follow' }); if (r.status) { body = r.text; break; } }
+    const hit = known.find((f) => f.fingerprint && body.includes(f.fingerprint));
+    if (hit) (hit.vulnerable ? unclaimed : parked).push(`${name} → ${cname} (${hit.service}: "${hit.fingerprint.slice(0, 50)}")`);
+  };
+  const queue = [...names]; await Promise.all(Array.from({ length: 8 }, async () => { while (queue.length) await check(queue.shift()); }));
+  const cookieNote = domainWideCookies.length ? ` — and cookies are set for the whole domain (${domainWideCookies.slice(0, 4).join(', ')}): whoever claims it reads and overwrites them` : '';
+  if (dangling.length) fail('dangling-cname', `dangling CNAME — the target no longer exists: ${dangling.join('; ')}. Anyone who registers that target serves content on your subdomain${cookieNote}. Delete the DNS record today`);
+  if (unclaimed.length) fail('takeover', `unclaimed service behind a subdomain (${source}): ${unclaimed.join('; ')} — claimable by anyone${cookieNote}. Delete the DNS record or reclaim the resource`);
+  if (parked.length) warn('unclaimed', `subdomain points at a service with nothing deployed: ${parked.join('; ')} — the provider now asks for domain verification, but the record is a loose end${cookieNote}; delete it`);
+  if (!dangling.length && !unclaimed.length && !parked.length) pass('subdomains', `${names.length} subdomain(s) checked against ${list.length} takeover fingerprints (${source}): no dangling CNAME, no unclaimed service`);
 }
 
 // ───────────────────────────── check (decision gate) ─────────────────────────────

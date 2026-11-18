@@ -1142,6 +1142,29 @@ the CSP. Lessons from the field:
   cross-site lands on a route that must trust nothing until its signature
   (HMAC against the ticket you stored) checks out.
 
+## 8.4c Cookies across subdomains, and subdomains nobody owns
+
+A cookie with `Domain=example.com` goes to every subdomain, and every
+subdomain can set one that the main site will read. That is the ordinary
+way to share a consent choice with a checkout on `checkout.example.com`, and
+harmless as long as the value is not trusted for anything. It becomes a
+problem in two cases: the cookie carries a session or token, or one of the
+subdomains is no longer yours.
+
+The second case is common. A CNAME was created for a help desk, a status
+page, a test deploy on GitHub Pages, Heroku, S3 or Azure; the resource was
+deleted, the record stayed. Whoever registers the same resource name now
+serves content on your subdomain — with your cookies in reach and your
+domain in the address bar.
+
+kekkai lists subdomains from certificate transparency (opt-in:
+`--subdomains`, it asks crt.sh about the domain), resolves every CNAME, and
+reports a target that no longer exists as a dangling CNAME and a target
+that shows a known "nothing here" page as an unclaimed service, using the
+community list *can-i-take-over-xyz*. The fix is always the same: delete the
+record. Then keep session cookies host-only (`__Host-`), so that even a lost
+subdomain cannot read or overwrite them.
+
 ## 8.5 Astro SSR + Shopify: the checks, per mode
 
 | mode | what kekkai does |

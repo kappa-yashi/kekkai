@@ -36,6 +36,10 @@ Two questions, opposite answers:
   run the local preview (secrets in a `.dev.vars` next to the generated
   `wrangler.json`), scan `http://localhost:<port>/<page>`, stop the preview,
   delete that `.dev.vars`. The live domain is the final check.
+- Cookies are checked in every live scan; subdomain takeover only with
+  `--subdomains` (it asks crt.sh about the domain) or `--subdomain-list`. Run
+  it before launch and after DNS changes; a dangling CNAME is fixed by
+  deleting the record.
 - Self-hosted origins (nginx in front of a Node app): read guide 8.4b; one
   scan per host (storefront plainly, API host with `--platform medusa`).
 - A private repository (`--private`, or detected through `gh`) reports docs

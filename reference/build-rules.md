@@ -199,6 +199,21 @@ property; do not trade it away for a feature.
   open only to Cloudflare's IP ranges (or Authenticated Origin Pulls, or a
   Tunnel) — the origin must not serve the site to anyone else.
 
+## Cookies and subdomains
+
+- When a subdomain or a service stops being used (an old deploy, a test
+  host, a help-desk or a status page), delete its DNS record the same day. A
+  CNAME to a resource that no longer exists can be claimed by anyone.
+- Cookies for the whole domain (`Domain=`) only for non-sensitive values,
+  such as a consent choice shared with a checkout subdomain. Session and auth
+  cookies stay host-only, ideally `__Host-`, `Secure`, `HttpOnly`,
+  `SameSite=Lax` or `Strict`.
+- A site that reads a cookie another subdomain may write treats it as
+  untrusted input: strict parse, never executed, never trusted for
+  authorisation.
+- Run `kekkai <url> --subdomains` after any DNS change and at least
+  before each launch.
+
 ## The other half
 
 kekkai asks what the site gives away. Its twin, `senrigan`, asks what the site

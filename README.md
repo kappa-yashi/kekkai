@@ -253,6 +253,12 @@ profile adds:
   only when it is *about* the platform, not about another company that runs
   its shop on it; a real platform incident is info — the vendor patches it
   for everyone.
+- Single-page apps that answer every path with their shell: probes,
+  version/changelog routes and text files are compared by type, `<title>`
+  and size (bodies differ per request), so the shell is not reported as a
+  served `_headers`, `Dockerfile` or changelog. CDN cookies (`__cf_bm`,
+  `cf_clearance`, load-balancer cookies) are listed as the CDN's, not judged
+  as the site's.
 - Repo checks follow relative imports one level: an Access-JWT check or a
   constant-time comparison (library call or XOR-accumulate loop) in a helper
   the middleware or the route imports now counts.

@@ -268,6 +268,16 @@ function changelogFindings(text, label) {
   else if (entries > 20) warn('changelog-size', `${label} is a full build history (${entries} entries) — publish a build id + date only (version.txt), keep the history in the repo`);
 }
 const HOST_CONFIG_RE = /^\/(?:_headers|_redirects|_routes\.json|\.assetsignore)$/;
+// SPA / soft-404 fallback: the app shell answers any path with 200. Bodies are rarely byte-identical (tokens, nonces,
+// timestamps, obfuscated emails), so compare type, <title> and size instead.
+const titleOf = (t) => (String(t).match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim();
+function isFallback(r, ref) {
+  if (!ref || !ref.status || !/html/i.test(r.headers['content-type'] || '') || !/html/i.test(ref.headers?.['content-type'] || '')) return false;
+  if (r.body?.equals && ref.body?.equals && r.body.equals(ref.body)) return true;
+  const a = r.body?.length || r.text.length, b = ref.body?.length || ref.text.length;
+  const close = b > 0 && Math.abs(a - b) / b < 0.03;
+  return close && titleOf(r.text) === titleOf(ref.text);
+}
 // robots.txt: every Disallow names a path to the world. Deduplicated across user-agent groups.
 const ROBOTS_PRIVATE_RE = /(^|\/)(admin|administrator|cms|login|signin|wp-admin|wp-login\.php|backend|dashboard|private|internal|staging|_admin|manage|secret|dev|wp-[a-z]+)(\/|$)/i;
 const ROBOTS_SUSPECT_RE = /(^|\/)(tools?|staff|team-only|debug|preview|drafts?|version|changelog|test|tmp|temp|backup|old|config|setup|install|ops|panel|console|reports?|exports?)(\/|$)/i;
@@ -743,7 +753,8 @@ async function liveScan(input) {
     const acc = ah['cache-control'] || '';
     const hashed = /\.[a-z0-9_-]{6,}\.(css|js|woff2?)$/i.test(au.pathname) || /[?&]v=/.test(au.search);
     if (hashed && !/immutable/i.test(acc)) info(`cache-${kind}`, `${kind} ${au.pathname} is content-hashed but not immutable (${acc || 'no Cache-Control'})`);
-    else pass(`cache-${kind}`, `${kind} ${au.pathname}: ${acc || 'no Cache-Control'}`);
+    else if (!acc) info(`cache-${kind}`, `${kind} ${au.pathname}: no Cache-Control — browsers and the CDN guess; ${kind === 'font' ? 'fonts rarely change: public, max-age=31536000, immutable (rename the file when it changes)' : 'set an explicit policy'}`);
+    else pass(`cache-${kind}`, `${kind} ${au.pathname}: ${acc}`);
     checkAcao(ah, kind);
     if (au.pathname.startsWith('/cdn-cgi/')) { if (!ah['strict-transport-security']) warn(`hsts-${kind}`, `${au.pathname} is served by Cloudflare itself, not from your _headers — it has no HSTS. Turn HSTS on at the zone (SSL/TLS → Edge Certificates); includeSubDomains there covers every subdomain, so check the DNS first.`); }
     else {
@@ -766,8 +777,10 @@ async function liveScan(input) {
   if (assetHeaderGap && /nginx/i.test(doc.headers.server || '') || assetHeaderGap && !doc.headers.server && !doc.headers['cf-ray']) info('nginx-inherit', 'headers present on the document but missing on assets: on nginx a location block with its own add_header drops every add_header inherited from above — include the headers snippet in each such location (or use always on a server-level include)');
   const assetTexts = [];
   for (const au of assetUrls) { const a = await get(au.href); if (a.status === 200 && !/\.(woff2?|ttf|otf)$/i.test(au.pathname)) { discl += checkDisclosureText(a.text, au.pathname); if (/\.m?js$/i.test(au.pathname)) assetTexts.push(a.text); } }
+  const fbProbe = await get(`${origin}/kekkai-${Date.now().toString(36)}-fallback/`);
   for (const p of ['version', 'version.txt', 'changelog', 'changelog.txt', 'CHANGELOG.md', 'release-notes', 'humans.txt']) {
     const r = await get(`${origin}/${p}`); if (r.status !== 200) continue;
+    if (fbProbe.status === 200 && (isFallback(r, fbProbe) || isFallback(r, doc))) continue; // the SPA answering every path with its shell
     discl += checkDisclosureText(r.text, `/${p}`, { html: /html/i.test(r.headers['content-type'] || '') });
     if (findSecurityVocab(r.text).length || findStagingHosts(r.text).length) warn('changelog', `/${p} is public even with noindex — write security-related entries neutrally ("housekeeping", "updated project notes")`);
     changelogFindings(r.text, `/${p}`);
@@ -852,6 +865,7 @@ async function liveScan(input) {
   }
   for (const f of ['llms.txt', 'sitemap.xml', 'sitemap-index.xml', 'rss.xml', 'feed.xml', 'atom.xml', 'humans.txt', '.well-known/security.txt', 'version.txt']) {
     const r = await get(`${origin}/${f}`); if (r.status !== 200) continue;
+    if (/html/i.test(r.headers['content-type'] || '') && /<html[\s>]/i.test(r.text)) continue; // the app shell answering a text-file path, not the file
     const em = findEmails(r.text);
     if (em.length && f !== '.well-known/security.txt' && f !== 'humans.txt') warn('txt-email', `/${f} contains an email address (${em.join(', ')}) — harvesters read text files, obfuscation cannot reach them`);
     if (f === '.well-known/security.txt') info('security-txt', `/.well-known/security.txt present${em.length ? ` (${em[0]})` : ''}`);
@@ -872,8 +886,10 @@ async function liveScan(input) {
     for (const p of probes) {
       const r = await get(`${origin}/${p}`);
       if (r.status !== 200) continue;
-      if (soft404 && r.body.equals(rnd.body)) continue;
+      if (soft404 && (isFallback(r, rnd) || isFallback(r, doc))) continue;
       const ct = (r.headers['content-type'] || '').split(';')[0];
+      // a config / source file answered with an HTML page that is the site's own shell is not the file
+      if (soft404 && /html/.test(ct) && !/\/$|\.php$|^server-status$/.test(p) && /<html[\s>]/i.test(r.text) && titleOf(r.text) && titleOf(r.text) === titleOf(doc.text)) continue;
       if (/^(admin|wp-admin|cms)\/$/.test(p) && /html/.test(ct) && !/sign in|login|password|admin|cms|netlify-cms|decap|sveltia|tina|keystatic/i.test(r.text)) continue; // generic page, not an admin
       hits++; fail('probe', `/${p} is served (200, ${ct || 'unknown type'}, ${r.body.length} bytes)`);
     }
@@ -1869,6 +1885,7 @@ function ssrRepoFindings(dir, tracked) {
 
 // ───────────────────────────── cookies and subdomains ─────────────────────────────
 const cookieJar = [];
+const CDN_COOKIE_RE = /^(?:__cf_bm|cf_clearance|__cflb|__cfruid|_cfuvid|__cfwaitingroom|cf_ob_info|cf_use_ob|AWSALB|AWSALBCORS|AWSALBTG|AWSELB|incap_ses_\d+_\d+|visid_incap_\d+|nlbi_\d+|ak_bmsc|bm_sz|bm_sv|_abck)$/;
 const SENSITIVE_COOKIE_RE = /sess|sid\b|^sid|auth|token|jwt|login|csrf|xsrf|remember|identity|account|customer/i;
 function parseSetCookie(raw) {
   const [nv, ...attrs] = raw.split(';').map((x) => x.trim());
@@ -1882,9 +1899,13 @@ function cookieFindings(https) {
   if (!seen.size) return;
   section('Cookies');
   const wide = [], sensitiveWide = [], insecure = [], none = [], noneInsecure = [], badPrefix = [];
+  const cdnOwned = [...seen.values()].filter((c) => CDN_COOKIE_RE.test(c.name)).map((c) => c.name);
+  for (const n of cdnOwned) seen.delete(n);
+  if (cdnOwned.length) info('cookies-cdn', `cookie(s) set by the CDN, not by the site: ${cdnOwned.join(', ')} — Cloudflare's bot / load-balancer cookies; their attributes are the CDN's, not a site setting`);
+  if (!seen.size) return;
   for (const c of seen.values()) {
     const sens = SENSITIVE_COOKIE_RE.test(c.name) || c.httpOnly;
-    if (c.domain) { wide.push(c.name); if (sens) sensitiveWide.push(`${c.name} (Domain=${c.domain}${c.httpOnly ? ', HttpOnly' : ''})`); }
+    if (c.domain && c.domain !== scanHost) { wide.push(c.name); if (sens) sensitiveWide.push(`${c.name} (Domain=${c.domain}${c.httpOnly ? ', HttpOnly' : ''})`); }
     if (https && !c.secure) insecure.push(c.name);
     if (c.sameSite === 'none') (c.secure ? none : noneInsecure).push(c.name);
     if (/^__Host-/.test(c.name) && (!c.secure || c.domain || c.path !== '/')) badPrefix.push(`${c.name} (${[!c.secure && 'no Secure', c.domain && 'has Domain', c.path !== '/' && `Path=${c.path || 'unset'}`].filter(Boolean).join(', ')})`);

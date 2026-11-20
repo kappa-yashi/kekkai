@@ -253,6 +253,10 @@ profile adds:
   only when it is *about* the platform, not about another company that runs
   its shop on it; a real platform incident is info — the vendor patches it
   for everyone.
+- Unknown URLs that redirect (to the home page or anywhere) are a soft 404
+  too: a warning. A `_headers` / `_redirects` served as a file means the host
+  does not read it — the report says so instead of only "served". Sites
+  built and hosted on Lovable are recognised (`/__l5e/` assets).
 - Single-page apps that answer every path with their shell: probes,
   version/changelog routes and text files are compared by type, `<title>`
   and size (bodies differ per request), so the shell is not reported as a

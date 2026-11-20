@@ -878,6 +878,7 @@ async function liveScan(input) {
     const rnd = await get(`${origin}/kekkai-${Date.now().toString(36)}-does-not-exist/`);
     const soft404 = rnd.status === 200;
     if (soft404) warn('soft-404', 'a random URL answers 200 (SPA fallback / soft 404) — probes below compare bodies, results are weaker');
+    else if (rnd.status >= 300 && rnd.status < 400) warn('soft-404', `a random URL answers ${rnd.status} → ${(rnd.headers.location || '?').slice(0, 60)} — unknown paths are redirected instead of answering 404; search engines treat that as a soft 404, and a broken campaign link lands on another page without any error. Answer 404 (and 301 only the old URLs you know)`);
     else pass('404', `random URL answers ${rnd.status}`);
     const defaultErr = rnd.text.match(/<hr>\s*<center>\s*(nginx|openresty|apache|caddy|litespeed)[^<]*<\/center>|<address>(Apache|nginx)[^<]*<\/address>/i);
     if (defaultErr) warn('error-page', `the 404 page is the server's built-in one and names it ("${(defaultErr[1] || defaultErr[2]).toLowerCase()}") — server_tokens off hides only the version; serve your own error pages (nginx: error_page 404 /404.html; proxy_intercept_errors on for the app)`);
@@ -891,6 +892,7 @@ async function liveScan(input) {
       // a config / source file answered with an HTML page that is the site's own shell is not the file
       if (soft404 && /html/.test(ct) && !/\/$|\.php$|^server-status$/.test(p) && /<html[\s>]/i.test(r.text) && titleOf(r.text) && titleOf(r.text) === titleOf(doc.text)) continue;
       if (/^(admin|wp-admin|cms)\/$/.test(p) && /html/.test(ct) && !/sign in|login|password|admin|cms|netlify-cms|decap|sveltia|tina|keystatic/i.test(r.text)) continue; // generic page, not an admin
+      if (/^_(headers|redirects)$/.test(p) && /^\s*(\/\S*|\S+\s+\S+\s+\d{3})/m.test(r.text)) { hits++; fail('probe', `/${p} is served as a file (${ct || 'unknown type'}, ${r.body.length} bytes) — this host does not read ${p}: the rules in it are not applied, and the file itself is public. Set headers / redirects where this host takes them (its settings, a CDN rule such as Cloudflare Transform Rules), or deploy to a host that reads ${p} (Cloudflare Pages, Netlify)`); continue; }
       hits++; fail('probe', `/${p} is served (200, ${ct || 'unknown type'}, ${r.body.length} bytes)`);
     }
     for (const p of ['nginx_status', 'stub_status', 'status/nginx']) { const r = await get(`${origin}/${p}`); if (r.status === 200 && /Active connections:/i.test(r.text)) { hits++; fail('probe', `/${p} exposes the nginx status page (connection counters) — restrict it to 127.0.0.1`); } }
@@ -950,6 +952,7 @@ async function liveScan(input) {
   if (behindCloudflare && opt.origin) await cloudflareSsl(host);
   else if (opt.origin && !behindCloudflare) info('origin', '--origin given, but the site does not answer through Cloudflare — the origin checks apply only behind Cloudflare');
   const products = detectProducts(doc.text, doc.headers, assetUrls.map((u) => u.pathname));
+  if (products.some((p) => p.name === 'lovable')) info('platform', 'built and hosted on Lovable (/__l5e/ assets): response headers, redirects and the status of unknown URLs are the platform\'s — a _headers, _redirects or 404.html in the project may not be applied; check every fix live');
   const shopHandles = shopifyStorefrontFindings([doc.text, ...assetTexts], 'live', { csp: doc.headers['content-security-policy'] || '', ownHost: host });
   if (shopHandles) { products.push({ name: 'shopify', version: null, where: 'storefront' }); if (shopHandles.length && !/^(localhost|127\.)/.test(host)) await shopifyHandleCheck(shopHandles); }
   const backendHosts = medusaStorefrontFindings([doc.text, ...assetTexts], 'live');
@@ -1504,7 +1507,7 @@ function aliasRe(name) {
 }
 const tokenRe = (name) => new RegExp(`(^|[^A-Za-z0-9@/._-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9._-])`, 'i');
 // hosted platforms with no version on the site's side (the vendor runs and patches them)
-const SAAS = new Set(['shopify', 'wix', 'webflow', 'hotelwize']);
+const SAAS = new Set(['shopify', 'wix', 'webflow', 'hotelwize', 'lovable']);
 // products: [{ name, version|null, where }] — name is an npm package or a platform/product keyword.
 function matchIncidents(data, products, label) {
   const incidents = data?.incidents || [];
@@ -1581,6 +1584,7 @@ function detectProducts(html, headers = {}, assetPaths = []) {
   if (/\/_next\//.test(all)) add('next.js', null, '/_next/ assets');
   if (/\/_nuxt\//.test(all)) add('nuxt', null, '/_nuxt/ assets');
   if (/webflow\.js|data-wf-site/i.test(all)) add('webflow', null, 'runtime');
+  if (/\/__l5e\//.test(all)) add('lovable', null, '/__l5e/ assets');
   if (/static\.wixstatic\.com|wix-code/i.test(all)) add('wix', null, 'runtime');
   if (/cdn\.shopify\.com|Shopify\.theme/i.test(all)) add('shopify', null, 'runtime');
   if (/builderassets\.com|hotelwize/i.test(all)) add('hotelwize', null, 'runtime');

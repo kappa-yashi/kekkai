@@ -413,18 +413,13 @@ Then set `build.inlineStylesheets: 'never'`, `vite.build.assetsInlineLimit: 0`
 and `markdown.syntaxHighlight: false` (or a class-based highlighter) in
 `astro.config.mjs`.
 
-## As a Claude skill
+## The guide
 
-This repository is also a skill: `SKILL.md` tells Claude to run the scanner,
-how to read the report, and in which order to fix things;
 `reference/build-rules.md` holds the rules to write by; `reference/hardening.md` is the long-form guide (headers template, two CSP
 strategies with code, build fingerprint, host-dashboard traps, leak audit, the
 threat model of a Git-based CMS, and what the repository itself discloses:
 secrets, docs, changelogs, history rewriting, platform profiles, self-hosted
-origins, cookies and subdomains). Copy the folder to `~/.claude/skills/kekkai`
-or add it to your project's skills. An installed skill is a copy: the skill
-starts every session by fetching the newest kekkai and says when the copy
-you installed is behind — replace the folder then.
+origins, cookies and subdomains).
 
 ## Limits
 
@@ -445,6 +440,6 @@ you installed is behind — replace the folder then.
 
 ## Licence
 
-- Code (`bin/`, `package.json`) and `SKILL.md`: [MIT](LICENSE).
+- Code (`bin/`, `package.json`): [MIT](LICENSE).
 - The guide `reference/hardening.md`: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) —
   reuse and adapt it freely, credit **kappa.yashi** and link to the source.

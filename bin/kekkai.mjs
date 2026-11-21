@@ -2075,7 +2075,7 @@ if (isRepo) productsForWatch = repoScan(target) || []; else if (isDir) productsF
 if (opt.watch && productsForWatch.length) { section('Known incidents (pwn.watch)'); const data = await loadIncidents(); if (data) matchIncidents(data, productsForWatch, isRepo ? `${productsForWatch.length} dependencies` : `${productsForWatch.length} detected product(s)`); }
 
 const latest = await latestPromise;
-if (latest && verCmp(latest, VERSION) > 0) updateMsg = `kekkai ${latest} is out — this is ${VERSION}. Update before trusting the report: npx --yes clear-npx-cache (npx) · git pull (a clone) · replace the installed skill folder (Claude skill)`;
+if (latest && verCmp(latest, VERSION) > 0) updateMsg = `kekkai ${latest} is out — this is ${VERSION}. Update before trusting the report: npx --yes clear-npx-cache (npx) · git pull (a clone)`;
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
 for (const r of results) counts[r.level]++;
 const failed = !notChecked && (counts.fail > 0 || (opt.strict && counts.warn > 0));

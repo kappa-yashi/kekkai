@@ -68,7 +68,7 @@ a page.
 
   # Strategy A: frame-ancestors is IGNORED inside a meta tag, so it must be a
   # real header; the rest of the CSP is a per-page meta tag (PART 2).
-  # Strategy B: delete this line, the full CSP goes on document paths (Trap 1.3).
+  # Strategy B: the full site CSP replaces this line, here under /* (Trap 1.3).
   Content-Security-Policy: frame-ancestors 'none'
   X-Frame-Options: DENY
 
@@ -116,18 +116,17 @@ export default defineConfig({ integrations: [headers()] /* … */ });
 import media from '../data/media.json';
 const mediaHost = (() => { try { return new URL(media.baseUrl).origin; } catch { return ''; } })();
 const DOC_CSP = [ /* see PART 2, Strategy B */ `media-src 'self'${mediaHost ? ' ' + mediaHost : ''}` ].join('; ');
-const DOC_PATHS = ['/', '/posts/*', '/tags/*', '/about/*', '/404.html' /* every HTML route */];
-export function headersFile() { /* emit /*, cache blocks, then one CSP block per DOC_PATH, then the CMS block */ }
+export function headersFile() { /* emit cache blocks, then /* with the site CSP, then the CMS block (! Content-Security-Policy first) */ }
 ```
 
 Do **not** also keep a `public/_headers`: two sources of truth, and one of them
 overwrites the other. Make the build **fail** if `public/_headers` reappears.
 
-**Better still: derive the document path list from the build output.** A
-post-build script that walks `dist/**/*.html`, emits one CSP block per route
-(or per route group) and writes `_headers` closes two traps at once: no CSP
-under `/*` (Trap 1.3), and no new page can ship without a CSP, because the list
-is the output itself. The same script is the natural place to stamp
+**Better still: write it from the build output.** A post-build script that
+writes `_headers` after the build closes two traps at once: the site CSP sits
+under `/*`, so no new page and no not-found page can ship without it (Trap
+1.3), and the paths that need another policy detach it in the same file, so
+none gets two. The same script is the natural place to stamp
 `version.txt` (PART 3) from `CF_PAGES_COMMIT_SHA`, and to strip comments from
 any config file that is served publicly (a CMS `config.yml`), since those
 comments are read by everyone. `kekkai init` scaffolds exactly this script
@@ -176,18 +175,42 @@ it matches `www.example.com` too, sends the page to itself, and every crawler
 reports a redirect loop. A Redirect Rule also cannot touch `*.pages.dev`: that
 is Cloudflare's zone, not yours. See PART 4.
 
-## Trap 1.3: two CSP headers on one path are BOTH enforced
+## Trap 1.3: two CSP headers on one path are BOTH enforced, and the 404 page matches only /*
 
 Because `_headers` rules are additive, a CSP under `/*` plus a different CSP
-under `/cms/*` sends **two** `Content-Security-Policy` headers to the CMS page.
-Browsers enforce every policy they receive, so the effective policy is the
-intersection. The CMS's wider policy can only narrow, never widen, and the
-admin breaks.
+under `/cms/*` sends **two** policies to the CMS page (Cloudflare joins the
+values with a comma, which a browser reads as two policies). Browsers enforce
+every policy they receive, so the effective policy is the intersection. The
+CMS's wider policy can only narrow, never widen, and the admin breaks.
 
-So with header CSPs, **never put a CSP under `/*`**. Attach the document CSP to
-an explicit list of document paths, and give the CMS path its own block. The
-cost is that a new top-level route ships **without** a CSP unless you add it to
-the list. Make the build check it (PART 5).
+The obvious way out, a CSP per document path (`/`, `/el/*`, `/404.html`) and
+nothing under `/*`, has a hole: Cloudflare Pages and Netlify serve `404.html`
+**under the path that was requested**. A visit to `/xyz` is matched against
+`/xyz`, not `/404.html`, so only `/*` reaches the not-found page, and it goes
+out with no CSP. `dist/` cannot show this: there the file really is
+`/404.html`. Only a request to an unknown path on the live site does.
+
+So put the site CSP **under `/*`**, and on a path that needs another policy,
+detach it first and then set its own, in a block that comes **after** `/*`
+(rules apply in file order; `!` removes only what earlier rules added):
+
+```
+/*
+  Content-Security-Policy: default-src 'none'; …
+
+/cms/*
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'self'; …
+```
+
+The same detach-then-set applies to any header a narrower path needs to change
+(`Cross-Origin-Opener-Policy` for a CMS login popup, `Cache-Control`). On a
+host that cannot detach a header (check yours), keep the site CSP under `/*`
+and give the exception its own subdomain, or at least put a `<meta>` CSP in
+`404.html` (it cannot carry `frame-ancestors`; `X-Frame-Options` under `/*`
+covers framing). `kekkai <url>` requests an unknown path and compares its
+headers with the home page's; `kekkai ./dist` warns when `404.html` would lose
+them.
 
 ## Trap 1.4: different content, different CSP
 
@@ -621,8 +644,9 @@ thing a single stray comment gives away forever.
 
 ## Every HTML file must be covered by a CSP rule
 
-Under Strategy B a new route added to `src/pages/` without being added to the
-CSP path list ships with no CSP and nothing complains. `kekkai ./dist`
+Under Strategy B with per-path CSP rules, a new route added to `src/pages/`
+without being added to the path list ships with no CSP and nothing complains
+(the site CSP under `/*`, Trap 1.3, removes this trap). `kekkai ./dist`
 reports it; wire the same check into the build so it cannot be forgotten.
 
 ## Automated tests worth keeping in the repo
@@ -661,7 +685,8 @@ folder with a tiny script. The admin `index.html` loads only that local file:
 no CDN script, so a compromised CDN cannot reach the publishing pipeline, and
 updating is a deliberate act.
 
-Give the CMS path **its own CSP** (Trap 1.3: never also a CSP under `/*`).
+Give the CMS path **its own CSP**, detaching the site one first (Trap 1.3:
+`! Content-Security-Policy`, then its own line, in a block after `/*`).
 Even self-hosted, the bundle still reaches out to the Git host's API, avatar
 and raw-content hosts; allow exactly those origins, per directive. The CMS UI
 usually needs `style-src 'unsafe-inline'`; that is acceptable **only** because
@@ -1196,7 +1221,8 @@ output and the live response, never your intention.**
       (recomputed from `dist/`, not assumed)
 - [ ] Strategy B: no executable inline script and no `style=""` in `dist/`
       (outside the CMS); every HTML file matches a CSP rule in `_headers`
-- [ ] No path receives two CSP headers (no CSP under `/*` when any path has its own)
+- [ ] No path receives two CSP headers (a path with its own CSP detaches the `/*` one)
+- [ ] An unknown path on the live site answers 404 with the same security headers as the home page
 - [ ] Every JSON-LD block parses
 - [ ] Local tests ran against a server that applies `_headers`, zero console/CSP
       errors across pages, themes and dialogs

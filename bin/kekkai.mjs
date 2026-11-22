@@ -880,6 +880,16 @@ async function liveScan(input) {
     if (soft404) warn('soft-404', 'a random URL answers 200 (SPA fallback / soft 404) — probes below compare bodies, results are weaker');
     else if (rnd.status >= 300 && rnd.status < 400) warn('soft-404', `a random URL answers ${rnd.status} → ${(rnd.headers.location || '?').slice(0, 60)} — unknown paths are redirected instead of answering 404; search engines treat that as a soft 404, and a broken campaign link lands on another page without any error. Answer 404 (and 301 only the old URLs you know)`);
     else pass('404', `random URL answers ${rnd.status}`);
+    if (!(rnd.status >= 300 && rnd.status < 400)) {
+      // the not-found page is served UNDER the unknown path: only header rules that match any path reach it
+      const SEC = ['content-security-policy', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'strict-transport-security', 'permissions-policy', 'cross-origin-opener-policy', 'cross-origin-resource-policy'];
+      const missing = SEC.filter((k) => doc.headers[k] && !rnd.headers[k]);
+      const metaOnly = missing.includes('content-security-policy') && inspectHtml(rnd.text || '').metaCsps.length > 0;
+      const why = 'Cloudflare Pages and Netlify serve 404.html under the requested path, so a rule for /404.html (or /, /el/ …) never matches it — only /* does. Put the site CSP under /*, and on a path that needs another policy detach it first (! Content-Security-Policy, then its own line)';
+      if (missing.length && !metaOnly) fail('404-headers', `the not-found page (${rnd.status} on an unknown path) lacks header(s) the home page has: ${missing.join(', ')} — ${why}`);
+      else if (missing.length) warn('404-headers', `the not-found page has no CSP header, only a <meta> CSP${missing.length > 1 ? `, and lacks ${missing.filter((k) => k !== 'content-security-policy').join(', ')}` : ''} — frame-ancestors is ignored in <meta>; ${why}`);
+      else pass('404-headers', `the not-found page carries the same security headers as the home page`);
+    }
     const defaultErr = rnd.text.match(/<hr>\s*<center>\s*(nginx|openresty|apache|caddy|litespeed)[^<]*<\/center>|<address>(Apache|nginx)[^<]*<\/address>/i);
     if (defaultErr) warn('error-page', `the 404 page is the server's built-in one and names it ("${(defaultErr[1] || defaultErr[2]).toLowerCase()}") — server_tokens off hides only the version; serve your own error pages (nginx: error_page 404 /404.html; proxy_intercept_errors on for the app)`);
     const probes = ['.git/HEAD', '.git/config', '.env', '.env.production', 'package.json', 'package-lock.json', 'astro.config.mjs', 'tsconfig.json', 'wrangler.toml', 'netlify.toml', '.DS_Store', 'server-status', 'phpinfo.php', 'wp-login.php', 'xmlrpc.php', 'admin/', 'wp-admin/', 'cms/', '.vscode/settings.json', 'config.json', '_headers', '_redirects', 'functions/', 'src/', 'node_modules/', 'nginx.conf', 'redirects.map', 'nginx-redirects.map', '.htaccess', 'Caddyfile', 'docker-compose.yml', 'Dockerfile', 'deploy.sh', '.npmrc'];
@@ -1110,7 +1120,19 @@ function distScan(dir) {
     pass('headers-file', `_headers with ${rules.length} rule block(s)`);
     const cspUnderStar = rules.find((r) => r.pattern === '/*' && r.set['content-security-policy']);
     const cspElsewhere = rules.filter((r) => r.pattern !== '/*' && r.set['content-security-policy']);
-    if (cspUnderStar && cspElsewhere.length) fail('csp-star', `a CSP under /* AND under ${cspElsewhere.map((r) => r.pattern).join(', ')} — rules are additive, those paths get TWO policies (the intersection)`);
+    const starIdx = rules.indexOf(cspUnderStar);
+    const doubled = cspUnderStar ? cspElsewhere.filter((r) => !(r.unset.includes('content-security-policy') && rules.indexOf(r) > starIdx)) : [];
+    if (doubled.length) fail('csp-star', `a CSP under /* AND under ${doubled.map((r) => r.pattern).join(', ')} — rules are additive (the values are joined with a comma), those paths get TWO policies (the intersection). Detach the /* one in that block: ! Content-Security-Policy, then its own line, with the block after /*`);
+    // the not-found page is served under ANY unknown path: rules for /404.html, /, /el/ … never reach it
+    const f404 = files.find((f) => f.rel === '/404.html');
+    if (f404) {
+      const SEC = ['content-security-policy', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'strict-transport-security', 'permissions-policy', 'cross-origin-opener-policy', 'cross-origin-resource-policy'];
+      const own = effectiveHeaders('/404.html', rules), unknown = effectiveHeaders(`/kekkai-${Date.now().toString(36)}-unknown/`, rules);
+      const lost = SEC.filter((k) => own[k] && !unknown[k]);
+      const meta = inspectHtml(read(f404)).metaCsps.length > 0;
+      if (lost.length) warn('404-path', `404.html is served under every unknown path, where rules for /404.html (or /, /el/ …) do not match: it loses ${lost.join(', ')}${lost.includes('content-security-policy') && meta ? ' (its <meta> CSP stays, without frame-ancestors)' : ''} — put the site CSP under /* and detach it (! Content-Security-Policy) on the paths that need another policy`);
+      else if (own['content-security-policy'] || meta) pass('404-path', '404.html keeps its CSP under any unknown path');
+    }
     if (existsSync(join(dir, 'public', '_headers'))) warn('headers-two', 'public/_headers next to a generated _headers — two sources of truth');
   }
   const htmls = files.filter((f) => /\.html?$/.test(f.rel));

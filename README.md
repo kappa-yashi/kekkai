@@ -65,6 +65,10 @@ or clone and run `node bin/kekkai.mjs <target>`.
 - sitemap listing private-looking or foreign-host URLs
 - well-known leak paths (`.git/HEAD`, `.env`, `package.json`, config files,
   `wp-login.php`, `admin/` …) with soft-404 detection
+- the not-found page on an unknown path carries the same security headers
+  as the home page (CSP, `X-Frame-Options`, `nosniff`, `Referrer-Policy` …):
+  the host serves `404.html` under the requested path, where per-path rules
+  never match
 - a sample of inner pages (same-origin redirects followed and reported): CSP +
   HSTS present on every route, inline code consistent with each page's own
   policy
@@ -82,8 +86,10 @@ or clone and run `node bin/kekkai.mjs <target>`.
 
 - parses `_headers` (Cloudflare/Netlify syntax, additive rules, `!` removals)
   and computes the effective headers of **every** HTML file
-- every HTML file covered by a CSP rule; no CSP under `/*` colliding with a
-  path CSP; a `public/_headers` next to a generated one
+- every HTML file covered by a CSP rule; a CSP under `/*` colliding with a
+  path CSP that does not detach it (`! Content-Security-Policy`); a
+  `404.html` that loses its headers under an unknown path; a
+  `public/_headers` next to a generated one
 - all header checks above, per header profile
 - inline scripts hashed against the policy; inline styles vs `style-src`
 - source maps and `sourceMappingURL` comments; lockfiles, `.env`, config,
@@ -396,8 +402,8 @@ npx github:kappa-yashi/kekkai init . --admin <cms-folder>
 Scaffolds, without touching existing files unless `--force`:
 
 - `scripts/kekkai-postbuild.mjs` — after `astro build`, writes `dist/_headers`
-  from the HTML that was actually built (one CSP block per route group, never
-  under `/*`, cache rules, the CMS block with its own CSP + `no-store` +
+  (the site CSP under `/*`, so the 404 page gets it on every unknown path;
+  cache rules; the CMS block detaches it and sets its own CSP + `no-store` +
   `noindex`), writes `version.txt` (`no-store`) from `package.json` +
   `CF_PAGES_COMMIT_SHA`, strips comments from served `.yml`/`.toml`, and fails
   if `public/_headers` exists. Edit the CONFIG block at the top.
